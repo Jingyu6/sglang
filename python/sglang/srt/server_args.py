@@ -1472,6 +1472,24 @@ class ServerArgs:
                 )
 
     def _handle_speculative_decoding(self):
+        # Default TiDAR algorithm when model architecture is TiDARForCausalLM
+        try:
+            if self.speculative_algorithm is None:
+                model_arch = self.get_hf_config().architectures[0]
+                if model_arch == "TiDARForCausalLM":
+                    self.speculative_algorithm = "TIDAR"
+            else:
+                # If user explicitly sets TIDAR, validate the model arch
+                if self.speculative_algorithm == "TIDAR":
+                    model_arch = self.get_hf_config().architectures[0]
+                    if model_arch != "TiDARForCausalLM":
+                        raise ValueError(
+                            "Speculative algorithm TIDAR requires a TiDAR model (architectures=['TiDARForCausalLM'])."
+                        )
+        except Exception:
+            # Keep silent if model config cannot be read at this time
+            pass
+
         if self.speculative_algorithm == "NEXTN":
             self.speculative_algorithm = "EAGLE"
 
@@ -2649,7 +2667,7 @@ class ServerArgs:
         parser.add_argument(
             "--speculative-algorithm",
             type=str,
-            choices=["EAGLE", "EAGLE3", "NEXTN", "STANDALONE", "NGRAM"],
+            choices=["EAGLE", "EAGLE3", "NEXTN", "STANDALONE", "NGRAM", "TIDAR"],
             help="Speculative algorithm.",
         )
         parser.add_argument(
@@ -2657,6 +2675,14 @@ class ServerArgs:
             "--speculative-draft-model",
             type=str,
             help="The path of the draft model weights. This can be a local folder or a Hugging Face repo ID.",
+        )
+        # TiDAR parameters
+        parser.add_argument(
+            "--tidar-B",
+            dest="tidar_B",
+            type=int,
+            default=1,
+            help="TiDAR branching size B: prefill emits B; decode plans B*(B+1) and accepts up to B.",
         )
         parser.add_argument(
             "--speculative-draft-model-revision",
