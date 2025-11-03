@@ -273,6 +273,12 @@ def _create_eagle_worker(**kwargs: Any) -> Any:
     return EAGLEWorker(**kwargs)
 
 
+def _create_tidar_worker(**kwargs: Any) -> Any:
+    from sglang.srt.speculative.tidar_worker import TiDARWorker
+
+    return TiDARWorker(**kwargs)
+
+
 def _create_standalone_worker(**kwargs: Any) -> Any:
     from sglang.srt.speculative.standalone_worker import StandaloneWorker
 
@@ -314,6 +320,11 @@ register_speculative_algorithm(
     "NGRAM",
     worker_cls=_create_ngram_worker,
     flags=("NGRAM",),
+)
+
+register_speculative_algorithm(
+    "TIDAR",
+    worker_cls=_create_tidar_worker,
 )
 
 
