@@ -1495,9 +1495,10 @@ class ServerArgs:
         if self.speculative_algorithm == "NEXTN":
             self.speculative_algorithm = "EAGLE"
         elif self.speculative_algorithm == "TIDAR":
-            self.speculative_num_draft_tokens = (
-                self.speculative_tidar_b * (self.speculative_tidar_b + 1) - 1
-            )
+            # self.speculative_num_draft_tokens = (
+            #     self.speculative_tidar_b * (self.speculative_tidar_b + 1) - 1
+            # )
+            self.speculative_num_draft_tokens = (self.speculative_tidar_b + 1) * (self.speculative_tidar_b + 1)
 
         if self.speculative_algorithm in ("EAGLE", "EAGLE3", "STANDALONE"):
             if self.speculative_algorithm == "STANDALONE" and self.enable_dp_attention:

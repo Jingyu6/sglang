@@ -20,6 +20,7 @@ from sglang.srt.managers.schedule_batch import (
     RequestStage,
     ScheduleBatch,
 )
+from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.tracing.trace import trace_slice
 from sglang.srt.utils.common import ceil_div
 
@@ -106,6 +107,15 @@ class SchedulerOutputProcessorMixin:
                     continue
 
                 if req.is_chunked <= 0:
+                    # TiDAR prefill should NOT append a token; it only prepares draft tokens for decode
+                    if batch.spec_algorithm == SpeculativeAlgorithm.TIDAR:
+                        trace_slice(
+                            RequestStage.PREFILL_FORWARD,
+                            req.rid,
+                            auto_next_anon=True,
+                            thread_finish_flag=req.finished(),
+                        )
+                        continue
                     # req output_ids are set here
                     req.output_ids.append(next_token_id)
                     req.check_finished()
