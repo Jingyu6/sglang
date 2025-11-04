@@ -98,5 +98,3 @@ class TiDARInput(SpecInput):
             req_to_token.shape[1],
         )
         return kv_indices, cum_kv_seq_len, qo_indptr, self.custom_mask
-
-
