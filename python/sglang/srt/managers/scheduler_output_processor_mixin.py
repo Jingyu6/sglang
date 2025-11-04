@@ -310,9 +310,31 @@ class SchedulerOutputProcessorMixin:
             next_token_ids = self._resolve_spec_overlap_token_ids(result, batch)
             allocate_lens_list = result.allocate_lens.tolist()
             accept_lens_list = result.accept_lens.tolist()
+        elif batch.spec_algorithm == SpeculativeAlgorithm.TIDAR:
+            # TiDAR multi-accept path: next_token_ids is flattened across reqs; split by accept_lens
+            accept_lens_list = result.accept_lens.tolist()
+            flat_ids = (
+                next_token_ids.tolist()
+                if isinstance(next_token_ids, torch.Tensor)
+                else list(next_token_ids)
+            )
+            next_token_ids = []
+            off = 0
+            for k in accept_lens_list:
+                next_token_ids.append(flat_ids[off : off + k])
+                off += k
+            # Update speculative metrics: use worker-provided value for consistency
+            self.update_spec_metrics(batch.batch_size(), result.num_accepted_tokens)
 
-        self.num_generated_tokens += len(batch.reqs)
-        if not batch.spec_algorithm.is_none():
+        if batch.spec_algorithm.is_none():
+            self.num_generated_tokens += len(batch.reqs)
+        elif batch.is_v2_eagle:
+            self.update_spec_metrics(batch.batch_size(), result.num_accepted_tokens)
+            self.num_generated_tokens += len(batch.reqs)
+        else:
+            # TiDAR multi-accept: count actual accepted tokens
+            self.num_generated_tokens += sum(accept_lens_list)
+        if not batch.spec_algorithm.is_none() and batch.is_v2_eagle:
             self.update_spec_metrics(batch.batch_size(), result.num_accepted_tokens)
 
         self.token_to_kv_pool_allocator.free_group_begin()
@@ -323,7 +345,12 @@ class SchedulerOutputProcessorMixin:
         for i, (req, next_token_id) in enumerate(zip(batch.reqs, next_token_ids)):
             req: Req
 
-            if self.enable_overlap and (req.finished() or req.is_retracted):
+            # Skip delayed-token free path for TiDAR; TiDAR manages frees internally
+            if (
+                batch.spec_algorithm != SpeculativeAlgorithm.TIDAR
+                and self.enable_overlap
+                and (req.finished() or req.is_retracted)
+            ):
                 indices_to_free = None
                 if batch.spec_algorithm.is_eagle():
                     from sglang.srt.speculative.eagle_info import EagleDraftInput
@@ -362,11 +389,27 @@ class SchedulerOutputProcessorMixin:
                 # Only v2 eagle's output_ids are updated here.
                 req.output_ids.extend(next_token_id)
                 new_accepted_len = len(next_token_id)
+            elif batch.spec_algorithm == SpeculativeAlgorithm.TIDAR:
+                # TiDAR multi-accept path
+                req.output_ids.extend(next_token_id)
+                new_accepted_len = len(next_token_id)
 
             req.check_finished(new_accepted_len)
 
             if req.finished():
-                if batch.is_v2_eagle and self.cur_batch.forward_mode.is_extend():
+                if batch.spec_algorithm == SpeculativeAlgorithm.TIDAR:
+                    # TiDAR finalization: free all KV for full output length (no delayed token semantics),
+                    # and release req/locks without going through tree_cache frees to avoid len-1 semantics.
+                    total_kv = len(req.origin_input_ids) + len(req.output_ids)
+                    if total_kv > 0:
+                        indices_to_free = self.req_to_token_pool.req_to_token[req.req_pool_idx][:total_kv]
+                        self.token_to_kv_pool_allocator.free(indices_to_free)
+                    # Release req slot in req_to_token_pool
+                    self.req_to_token_pool.free(req.req_pool_idx)
+                    # Release radix lock refs acquired during prefill/updates
+                    self.tree_cache.dec_lock_ref(req.last_node)
+                    req.time_stats.completion_time = time.perf_counter()
+                elif batch.is_v2_eagle and self.cur_batch.forward_mode.is_extend():
                     # FIXME(lsyin): fix the messy logic here
                     # 1) when not overlap (v2 impl), we free the extra tokens in the req
                     # 2) overlap eagle and the current batch is prefill. This seq will not run extra iteration.
@@ -381,12 +424,13 @@ class SchedulerOutputProcessorMixin:
                     ][start_p:end_p]
                     self.token_to_kv_pool_allocator.free(indices_to_free)
 
-                if self.server_args.disaggregation_decode_enable_offload_kvcache:
+                if batch.spec_algorithm != SpeculativeAlgorithm.TIDAR and self.server_args.disaggregation_decode_enable_offload_kvcache:
                     # Asynchronously offload KV cache; cache_finished_req will be called after Device->Host transfer completes
                     if not self.decode_offload_manager.offload_kv_cache(req):
                         self.tree_cache.cache_finished_req(req)
                 else:
-                    self.tree_cache.cache_finished_req(req)
+                    if batch.spec_algorithm != SpeculativeAlgorithm.TIDAR:
+                        self.tree_cache.cache_finished_req(req)
 
                 req.time_stats.completion_time = time.perf_counter()
 
