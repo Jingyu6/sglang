@@ -21,7 +21,7 @@ def build_tidar_positions_and_mask_prefill(
     positions = (
         torch.repeat_interleave(seq_lens.to(torch.long), repeats=block_size)
         + offsets.repeat(bs)
-    ).contiguous()
+    )
 
     # Placeholder: user should supply planned ids; zeros for scaffold
     draft_tokens = torch.full((bs * block_size,), mask_token_id, dtype=torch.long, device=device)
@@ -31,7 +31,7 @@ def build_tidar_positions_and_mask_prefill(
     # Since it's fully True per row, we can allocate directly by total length.
     total_mask_len = int(block_size * seq_lens.sum().item() + bs * block_size * block_size)
     custom_mask = torch.ones((total_mask_len,), dtype=torch.bool, device=device)
-    return draft_tokens, positions, custom_mask
+    return draft_tokens.contiguous(), positions.contiguous(), custom_mask.contiguous()
 
 
 def build_tidar_positions_and_mask_decode(
@@ -57,7 +57,7 @@ def build_tidar_positions_and_mask_decode(
     positions = (
         torch.repeat_interleave(seq_lens.to(torch.long), repeats=B)
         + offsets.repeat(bs)
-    ).contiguous()
+    )
 
     draft_token = prev_draft_tokens.view(bs, block_size)
     draft_token = torch.concat(
@@ -86,4 +86,4 @@ def build_tidar_positions_and_mask_decode(
         )
     custom_mask = torch.concat(masks, dim=-1)
 
-    return draft_token, positions, custom_mask
+    return draft_token.contiguous(), positions.contiguous(), custom_mask.contiguous()

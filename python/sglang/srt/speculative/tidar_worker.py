@@ -107,7 +107,7 @@ class TiDARWorker(BaseSpecWorker):
             positions=None,
             custom_mask=None,
             num_queries=0,
-            send_tokens=next_token_ids,
+            send_tokens=next_token_ids.to(torch.int64).contiguous().clone(),
             B=block_size,
         )
 
@@ -171,50 +171,92 @@ class TiDARWorker(BaseSpecWorker):
         slots_per_req = total_slots // bs
         page_size = self.page_size
 
-        if page_size == 1:
-            evict_mask = torch.full((bs * slots_per_req,), True, dtype=torch.bool, device=self.device)
-            evict_mask[accept_index] = False
-            to_free = batch.out_cache_loc[evict_mask]
-            to_free = to_free[to_free > 0]
-            if to_free.numel() > 0:
-                self.target_worker.model_runner.token_to_kv_pool_allocator.free(to_free)
-            batch.out_cache_loc = batch.out_cache_loc[accept_index]
+        # Short-circuit: nothing accepted (e.g., prefill draft cleanup).
+        if accept_index.numel() == 0:
+            if page_size == 1:
+                to_free_all = batch.out_cache_loc[batch.out_cache_loc > 0]
+                if to_free_all.numel() > 0:
+                    self.target_worker.model_runner.token_to_kv_pool_allocator.free(to_free_all)
+                batch.out_cache_loc = batch.out_cache_loc[:0]
+            else:
+                # In paged mode, avoid freeing indices that belong to the existing partial page of the prefix.
+                # Compute to_free using the same helper kernel to only free newly allocated tail slots.
+                bs_np = next_power_of_2(bs)
+                sp_np = next_power_of_2(slots_per_req)
+                # For zero accept, prepare tensors to extract only the tail slots to free.
+                accept_lens_zero = torch.zeros_like(batch.seq_lens, dtype=torch.int32, device=self.device)
+                # Dummy tgt_loc has shape sum(accept_len+1) == bs; will be ignored.
+                tgt_loc_dummy = torch.empty((bs,), dtype=torch.int64, device=self.device)
+                # Number of slots to free per req
+                extended_len = batch.seq_lens + slots_per_req
+                keep_len = torch.minimum(
+                    ((batch.seq_lens + 1 + page_size - 1) // page_size) * page_size,
+                    extended_len,
+                )
+                to_free_num_slots = (extended_len - keep_len).to(torch.int32)
+                total_to_free = int(to_free_num_slots.sum().item())
+                if total_to_free > 0:
+                    to_free_slots = torch.empty((total_to_free,), dtype=torch.int64, device=self.device)
+                    get_target_cache_loc[(bs,)](
+                        tgt_loc_dummy,
+                        to_free_slots,
+                        accept_lens_zero,
+                        to_free_num_slots,
+                        batch.out_cache_loc,
+                        slots_per_req,
+                        sp_np,
+                        bs_np,
+                    )
+                    to_free = to_free_slots[to_free_slots > 0]
+                    if to_free.numel() > 0:
+                        self.target_worker.model_runner.token_to_kv_pool_allocator.free(to_free)
+                batch.out_cache_loc = batch.out_cache_loc[:0]
         else:
-            if slots_per_req == 1:
+            if page_size == 1:
                 evict_mask = torch.full((bs * slots_per_req,), True, dtype=torch.bool, device=self.device)
                 evict_mask[accept_index] = False
-                align_evict_mask_to_page_size[(bs,)](
-                    batch.seq_lens, evict_mask, page_size, slots_per_req, next_power_of_2(slots_per_req)
-                )
                 to_free = batch.out_cache_loc[evict_mask]
                 to_free = to_free[to_free > 0]
                 if to_free.numel() > 0:
                     self.target_worker.model_runner.token_to_kv_pool_allocator.free(to_free)
                 batch.out_cache_loc = batch.out_cache_loc[accept_index]
             else:
-                src_loc, tgt_loc, to_free_num_slots = get_src_tgt_cache_loc(
-                    batch.seq_lens, batch.out_cache_loc, accept_index, accept_lens, slots_per_req, page_size
-                )
-                to_free_slots = torch.empty(
-                    (to_free_num_slots.sum().item(),), dtype=torch.int64, device=self.device
-                )
-                get_target_cache_loc[(bs,)](
-                    tgt_loc,
-                    to_free_slots,
-                    accept_lens,
-                    to_free_num_slots,
-                    batch.out_cache_loc,
-                    slots_per_req,
-                    next_power_of_2(slots_per_req),
-                    next_power_of_2(bs),
-                )
-                to_free = to_free_slots[to_free_slots > 0]
-                if to_free.numel() > 0:
-                    self.target_worker.model_runner.token_to_kv_pool_allocator.free(to_free)
-                self.target_worker.model_runner.token_to_kv_pool_allocator.get_kvcache().move_kv_cache(
-                    tgt_loc, src_loc
-                )
-                batch.out_cache_loc = tgt_loc
+                if slots_per_req == 1:
+                    evict_mask = torch.full((bs * slots_per_req,), True, dtype=torch.bool, device=self.device)
+                    evict_mask[accept_index] = False
+                    align_evict_mask_to_page_size[(bs,)](
+                        batch.seq_lens, evict_mask, page_size, slots_per_req, next_power_of_2(slots_per_req)
+                    )
+                    to_free = batch.out_cache_loc[evict_mask]
+                    to_free = to_free[to_free > 0]
+                    if to_free.numel() > 0:
+                        self.target_worker.model_runner.token_to_kv_pool_allocator.free(to_free)
+                    batch.out_cache_loc = batch.out_cache_loc[accept_index]
+                else:
+                    src_loc, tgt_loc, to_free_num_slots = get_src_tgt_cache_loc(
+                        batch.seq_lens, batch.out_cache_loc, accept_index, accept_lens, slots_per_req, page_size
+                    )
+                    to_free_slots = torch.empty(
+                        (to_free_num_slots.sum().item(),), dtype=torch.int64, device=self.device
+                    )
+                    get_target_cache_loc[(bs,)](
+                        tgt_loc,
+                        to_free_slots,
+                        accept_lens,
+                        to_free_num_slots,
+                        batch.out_cache_loc,
+                        slots_per_req,
+                        next_power_of_2(slots_per_req),
+                        next_power_of_2(bs),
+                    )
+                    # Move first, then free leftover slots to avoid writing into freed memory
+                    self.target_worker.model_runner.token_to_kv_pool_allocator.get_kvcache().move_kv_cache(
+                        tgt_loc, src_loc
+                    )
+                    to_free = to_free_slots[to_free_slots > 0]
+                    if to_free.numel() > 0:
+                        self.target_worker.model_runner.token_to_kv_pool_allocator.free(to_free)
+                    batch.out_cache_loc = tgt_loc
 
         # Update req_to_token mapping for accepted tokens and clear rejected ones
         pre_seq_lens = batch.seq_lens.clone()
@@ -302,11 +344,6 @@ class TiDARWorker(BaseSpecWorker):
         # Keep only the first accept_cnt queries' KV; evict the rest
         accept_lens = torch.full((bs,), accept_cnt, dtype=torch.int32, device=self.device)
 
-        # print(new_draft_tokens)
-        # print(verify_tokens)
-        # print(accept_lens)
-        # exit()
-
         # Indices to keep per sequence: [0..accept_cnt-1]
         row_offsets = torch.arange(bs, device=self.device) * B
         accept_index = torch.cat([
@@ -324,7 +361,7 @@ class TiDARWorker(BaseSpecWorker):
             positions=None,
             custom_mask=None,
             num_queries=0,
-            send_tokens=select_draft_tokens.view(-1),
+            send_tokens=select_draft_tokens.view(-1).to(torch.int64).contiguous().clone(),
             B=block_size,
         )
 
