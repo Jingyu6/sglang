@@ -300,12 +300,12 @@ class TiDARWorker(BaseSpecWorker):
         # TiDAR verification
         assert bs == 1, "TiDAR only supports batch size 1 for now"
         accept_cnt = 1
-        select_draft_tokens = new_draft_tokens[0, 1]
+        select_draft_tokens = new_draft_tokens[0, 1] # we default to the first new draft set
 
         while accept_cnt < block_size:
-            if new_draft_tokens[0, accept_cnt, 0].item() != verify_tokens[0, accept_cnt].item():
+            if new_draft_tokens[0, 0, accept_cnt - 1].item() != verify_tokens[0, accept_cnt].item():
                 break
-            select_draft_tokens = new_draft_tokens[0, accept_cnt]
+            select_draft_tokens = new_draft_tokens[0, accept_cnt + 1]
             accept_cnt += 1
 
         # Keep only the first accept_cnt queries' KV; evict the rest
@@ -335,6 +335,12 @@ class TiDARWorker(BaseSpecWorker):
         accept_tokens = verify_tokens[0, :accept_cnt].view(-1)
         total_accepted = int(accept_lens.sum().item()) - bs # - bs to make the metric consistent
         assert total_accepted >= 0, "Total accepted tokens must be non-negative"
+
+        # print(f"prev_draft_tokens: {prev_draft_tokens}")
+        # print(f"new_draft_tokens: {new_draft_tokens}")
+        # print(f"accept_tokens: {accept_tokens}")
+        # print("================================================")
+
         return GenerationBatchResult(
             logits_output=logits_output,
             next_token_ids=accept_tokens,
