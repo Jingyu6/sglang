@@ -17,14 +17,22 @@ from sglang.srt.layers.attention.utils import create_flashinfer_kv_indices_trito
 
 @dataclass
 class TiDARInput(SpecInput):
-    draft_token: torch.Tensor
-    positions: torch.Tensor
-    custom_mask: torch.Tensor
+    # Verify-mode fields (prefill/verify attention)
+    draft_token: Optional[torch.Tensor]
+    positions: Optional[torch.Tensor]
+    custom_mask: Optional[torch.Tensor]
     num_queries: int
+    # Draft-carrier fields (handoff between steps)
+    send_tokens: Optional[torch.Tensor] = None  # flattened length = bs * B
+    B: Optional[int] = None
 
     def __post_init__(self):
-        # Reuse verify type so FlashInfer prefill wrappers accept custom_mask path
-        super().__init__(SpecInputType.EAGLE_VERIFY)
+        # If carrying tokens across steps, mark as draft; else mark as verify
+        if self.send_tokens is not None:
+            super().__init__(SpecInputType.EAGLE_DRAFT)
+        else:
+            # Reuse verify type so FlashInfer prefill wrappers accept custom_mask path
+            super().__init__(SpecInputType.EAGLE_VERIFY)
 
     def get_spec_adjust_token_coefficient(self) -> Tuple[int, int]:
         return self.num_queries, self.num_queries

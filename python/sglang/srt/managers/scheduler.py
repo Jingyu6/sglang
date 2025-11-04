@@ -2006,6 +2006,9 @@ class Scheduler(
 
                     batch.spec_info = batch_result.next_draft_input
                     batch.spec_info.future_indices = future_indices
+                elif self.spec_algorithm == SpeculativeAlgorithm.TIDAR:
+                    # Propagate TiDAR draft input between steps
+                    batch.spec_info = batch_result.next_draft_input
 
                     # batch.spec_info = EagleDraftInput(
                     #     future_indices=future_indices,
@@ -2025,6 +2028,9 @@ class Scheduler(
                     batch_or_worker_batch
                 )
                 future_indices_or_next_token_ids = batch_result.next_token_ids
+                # Propagate TiDAR draft input between steps
+                if self.spec_algorithm == SpeculativeAlgorithm.TIDAR:
+                    batch.spec_info = batch_result.next_draft_input
                 self.update_cache_from_scheduler(batch, batch_result)
 
             # NOTE: future_indices_or_next_token_ids is used in ScheduleBatch,
