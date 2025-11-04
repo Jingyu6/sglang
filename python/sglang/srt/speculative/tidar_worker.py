@@ -171,46 +171,13 @@ class TiDARWorker(BaseSpecWorker):
         slots_per_req = total_slots // bs
         page_size = self.page_size
 
-        # Short-circuit: nothing accepted (e.g., prefill draft cleanup).
+        # Short-circuit: nothing accepted (e.g., prefill draft cleanup). Free all and skip compaction.
         if accept_index.numel() == 0:
-            if page_size == 1:
-                to_free_all = batch.out_cache_loc[batch.out_cache_loc > 0]
-                if to_free_all.numel() > 0:
-                    self.target_worker.model_runner.token_to_kv_pool_allocator.free(to_free_all)
-                batch.out_cache_loc = batch.out_cache_loc[:0]
-            else:
-                # In paged mode, avoid freeing indices that belong to the existing partial page of the prefix.
-                # Compute to_free using the same helper kernel to only free newly allocated tail slots.
-                bs_np = next_power_of_2(bs)
-                sp_np = next_power_of_2(slots_per_req)
-                # For zero accept, prepare tensors to extract only the tail slots to free.
-                accept_lens_zero = torch.zeros_like(batch.seq_lens, dtype=torch.int32, device=self.device)
-                # Dummy tgt_loc has shape sum(accept_len+1) == bs; will be ignored.
-                tgt_loc_dummy = torch.empty((bs,), dtype=torch.int64, device=self.device)
-                # Number of slots to free per req
-                extended_len = batch.seq_lens + slots_per_req
-                keep_len = torch.minimum(
-                    ((batch.seq_lens + 1 + page_size - 1) // page_size) * page_size,
-                    extended_len,
-                )
-                to_free_num_slots = (extended_len - keep_len).to(torch.int32)
-                total_to_free = int(to_free_num_slots.sum().item())
-                if total_to_free > 0:
-                    to_free_slots = torch.empty((total_to_free,), dtype=torch.int64, device=self.device)
-                    get_target_cache_loc[(bs,)](
-                        tgt_loc_dummy,
-                        to_free_slots,
-                        accept_lens_zero,
-                        to_free_num_slots,
-                        batch.out_cache_loc,
-                        slots_per_req,
-                        sp_np,
-                        bs_np,
-                    )
-                    to_free = to_free_slots[to_free_slots > 0]
-                    if to_free.numel() > 0:
-                        self.target_worker.model_runner.token_to_kv_pool_allocator.free(to_free)
-                batch.out_cache_loc = batch.out_cache_loc[:0]
+            to_free_all = batch.out_cache_loc[batch.out_cache_loc > 0]
+            if to_free_all.numel() > 0:
+                self.target_worker.model_runner.token_to_kv_pool_allocator.free(to_free_all)
+            # Clear out_cache_loc; mapping cleanup happens below
+            batch.out_cache_loc = batch.out_cache_loc[:0]
         else:
             if page_size == 1:
                 evict_mask = torch.full((bs * slots_per_req,), True, dtype=torch.bool, device=self.device)
