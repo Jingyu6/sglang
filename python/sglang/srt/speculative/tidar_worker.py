@@ -4,7 +4,7 @@ from typing import Optional
 
 import torch
 
-from sglang.srt.managers.schedule_batch import ModelWorkerBatch
+from sglang.srt.managers.schedule_batch import ModelWorkerBatch, ScheduleBatch
 from sglang.srt.managers.utils import GenerationBatchResult
 from sglang.srt.managers.tp_worker import TpModelWorker
 from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode
@@ -39,7 +39,8 @@ class TiDARWorker(BaseSpecWorker):
         self._target_worker = target_worker
         self.page_size = server_args.page_size
         # TiDAR parameters
-        self.B = getattr(server_args, "tidar_B", 1)
+        self.speculative_tidar_b = server_args.speculative_tidar_b
+        self.mask_token_id = 151662
 
     @property
     def target_worker(self):
@@ -53,7 +54,10 @@ class TiDARWorker(BaseSpecWorker):
     def clear_cache_pool(self):
         pass
 
-    def forward_batch_generation(self, model_worker_batch: ModelWorkerBatch):
+    def forward_batch_generation(self, model_worker_batch: ModelWorkerBatch | ScheduleBatch):
+        if isinstance(model_worker_batch, ScheduleBatch):
+            model_worker_batch = model_worker_batch.get_model_worker_batch()
+
         if model_worker_batch.forward_mode.is_decode():
             return self._decode_step(model_worker_batch)
         else:
@@ -61,12 +65,12 @@ class TiDARWorker(BaseSpecWorker):
             model_worker_batch.capture_hidden_mode = CaptureHiddenMode.FULL
             base = self.target_worker.forward_batch_generation(model_worker_batch)
             # Then emit B tokens using TiDAR prefill with custom mask
-            return self._prefill_emit_B(model_worker_batch, base)
+            return self._prefill_draft_only(model_worker_batch, base)
 
-    def _prefill_emit_B(self, batch: ModelWorkerBatch, base: GenerationBatchResult):
-        B = self.B
+    def _prefill_draft_only(self, batch: ModelWorkerBatch, base: GenerationBatchResult):
+        B = self.speculative_tidar_b
         draft_token, positions, custom_mask = build_tidar_positions_and_mask_prefill(
-            seq_lens=batch.seq_lens, B=B, device=self.device
+            seq_lens=batch.seq_lens, B=B, mask_token_id=self.mask_token_id, device=self.device
         )
         spec_input = TiDARInput(draft_token, positions, custom_mask, num_queries=B)
         verify_fb, can_graph = spec_input.prepare_for_v2_verify(
@@ -82,23 +86,44 @@ class TiDARWorker(BaseSpecWorker):
         )
         logits_output = forward_out.logits_output
         next_token_ids = torch.argmax(logits_output.next_token_logits, dim=-1)
-        accept_lens = torch.full_like(batch.seq_lens, B, dtype=torch.int32)
-        batch.seq_lens.add_(accept_lens)
+
+        # Evict KV cache for the newly allocated B tokens (do not persist KV at prefill)
+        self.target_worker.model_runner.token_to_kv_pool_allocator.free(batch.out_cache_loc)
+        # No acceptance at prefill stage; keep lengths unchanged
+        accept_lens = torch.zeros_like(batch.seq_lens, dtype=torch.int32)
+
+        # Send B draft tokens (no KV cache) to the first decode step
+        next_draft_input = TiDARInput(
+            draft_token=None,
+            positions=None,
+            custom_mask=None,
+            num_queries=0,
+            send_tokens=next_token_ids,
+            B=B,
+        )
         return GenerationBatchResult(
             logits_output=logits_output,
             next_token_ids=next_token_ids,
             can_run_cuda_graph=can_graph,
-            next_draft_input=None,
+            next_draft_input=next_draft_input,
             accept_lens=accept_lens,
             allocate_lens=None,
         )
 
     def _decode_step(self, batch: ModelWorkerBatch):
-        B = self.B
+        B = self.speculative_tidar_b
         m = B * (B + 1)
 
+        # get the previous draft tokens
+        assert batch.spec_info is not None, "Missing draft tokens from the previous step"
+        prev_draft_tokens = batch.spec_info.send_tokens
+
         draft_token, positions, custom_mask = build_tidar_positions_and_mask_decode(
-            seq_lens=batch.seq_lens, B=B, device=self.device
+            seq_lens=batch.seq_lens, 
+            B=B, 
+            prev_draft_tokens=prev_draft_tokens, 
+            mask_token_id=self.mask_token_id, 
+            device=self.device
         )
         spec_input = TiDARInput(draft_token, positions, custom_mask, num_queries=m)
         verify_fb, can_graph = spec_input.prepare_for_v2_verify(
@@ -113,6 +138,10 @@ class TiDARWorker(BaseSpecWorker):
             skip_attn_backend_init=True,
         )
         logits_output = forward_out.logits_output
+        print(logits_output.next_token_logits)
+        print(logits_output.next_token_logits.shape)
+        exit()
+        # TiDAR verification
         tokens = torch.argmax(logits_output.next_token_logits, dim=-1)
 
         # Determine N (<= B) accepted per sequence; fallback to B if not provided
@@ -171,11 +200,23 @@ class TiDARWorker(BaseSpecWorker):
         # Advance lengths
         batch.seq_lens.add_(accept_lens)
 
+        # Send B tokens to the next decode step (placeholder selection: first B per seq)
+        tokens_2d = tokens.view(bs, m)
+        to_send = tokens_2d[:, :B].contiguous().view(-1)
+        next_draft_input = TiDARInput(
+            draft_token=None,
+            positions=None,
+            custom_mask=None,
+            num_queries=0,
+            send_tokens=to_send,
+            B=B,
+        )
+
         return GenerationBatchResult(
             logits_output=logits_output,
             next_token_ids=tokens,
             can_run_cuda_graph=can_graph,
-            next_draft_input=None,
+            next_draft_input=next_draft_input,
             accept_lens=accept_lens,
             allocate_lens=None,
         )

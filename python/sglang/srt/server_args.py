@@ -385,6 +385,8 @@ class ServerArgs:
     speculative_ngram_match_type: Literal["BFS", "PROB"] = "BFS"
     speculative_ngram_branch_length: int = 18
     speculative_ngram_capacity: int = 10 * 1000 * 1000
+    # For TiDAR only
+    speculative_tidar_b: int = 16
 
     # Expert parallelism
     ep_size: int = 1
@@ -1492,6 +1494,10 @@ class ServerArgs:
 
         if self.speculative_algorithm == "NEXTN":
             self.speculative_algorithm = "EAGLE"
+        elif self.speculative_algorithm == "TIDAR":
+            self.speculative_num_draft_tokens = (
+                self.speculative_tidar_b * (self.speculative_tidar_b + 1) - 1
+            )
 
         if self.speculative_algorithm in ("EAGLE", "EAGLE3", "STANDALONE"):
             if self.speculative_algorithm == "STANDALONE" and self.enable_dp_attention:
@@ -2678,10 +2684,10 @@ class ServerArgs:
         )
         # TiDAR parameters
         parser.add_argument(
-            "--tidar-B",
-            dest="tidar_B",
+            "--speculative-tidar-b",
+            dest="speculative_tidar_b",
             type=int,
-            default=1,
+            default=ServerArgs.speculative_tidar_b,
             help="TiDAR branching size B: prefill emits B; decode plans B*(B+1) and accepts up to B.",
         )
         parser.add_argument(
