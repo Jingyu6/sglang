@@ -17,6 +17,6 @@ if __name__ == "__main__":
     while True:
         print('='*100)
         prompt = input("Enter a prompt: ")
-        response = text_gen.run(prompt=prompt, runtime=runtime)
+        response = text_gen.run(prompt=prompt, backend=runtime)
         print(response['response'])
         print('='*100)
