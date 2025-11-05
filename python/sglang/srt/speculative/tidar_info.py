@@ -59,6 +59,7 @@ class TiDARInput(SpecInput):
         forward_batch = ForwardBatch.init_new(batch, target_worker.model_runner)
         forward_batch.spec_info = self
         forward_batch.positions = self.positions
+        # skip attention backend init because later it will be initialized
         return forward_batch, bool(
             target_worker.model_runner.graph_runner
             and target_worker.model_runner.graph_runner.can_run(forward_batch)
