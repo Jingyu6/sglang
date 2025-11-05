@@ -331,7 +331,7 @@ class SchedulerOutputProcessorMixin:
         elif batch.is_v2_eagle:
             self.update_spec_metrics(batch.batch_size(), result.num_accepted_tokens)
             self.num_generated_tokens += len(batch.reqs)
-        else:
+        elif batch.spec_algorithm == SpeculativeAlgorithm.TIDAR:
             # TiDAR multi-accept: count actual accepted tokens
             self.num_generated_tokens += sum(accept_lens_list)
         if not batch.spec_algorithm.is_none() and batch.is_v2_eagle:
