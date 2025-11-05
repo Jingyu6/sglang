@@ -73,7 +73,7 @@ class TiDARWorker(BaseSpecWorker):
     def _prefill_draft_only(self, batch: ModelWorkerBatch, base: GenerationBatchResult):
         block_size = self.speculative_tidar_b
         draft_token, positions, custom_mask = build_tidar_positions_and_mask_prefill(
-            seq_lens=batch.seq_lens, block_size=block_size, mask_token_id=self.mask_token_id, device=self.device
+            seq_lens=batch.seq_lens_cpu, block_size=block_size, mask_token_id=self.mask_token_id, device=self.device
         )
         spec_input = TiDARInput(draft_token, positions, custom_mask, num_queries=block_size)
         self.target_worker.model_runner.attn_backend.num_draft_tokens = block_size
@@ -97,10 +97,10 @@ class TiDARWorker(BaseSpecWorker):
         # print("================================================")
 
         # No acceptance at prefill draft stage; keep lengths unchanged
-        accept_lens = torch.zeros_like(batch.seq_lens, dtype=torch.int32)
+        accept_lens = torch.zeros_like(batch.seq_lens_cpu, dtype=torch.int32)
 
         empty_idx = torch.empty(0, dtype=torch.int32, device=self.device)
-        empty_lens = torch.zeros_like(batch.seq_lens, dtype=torch.int32, device=self.device)
+        empty_lens = torch.zeros_like(batch.seq_lens_cpu, dtype=torch.int32, device=self.device)
         self._free_kv_slots(batch, empty_idx, empty_lens)
 
         # Send B draft tokens (no KV cache) to the first decode step
@@ -123,7 +123,7 @@ class TiDARWorker(BaseSpecWorker):
         )
 
     def _alloc_kv_slots(self, batch: ModelWorkerBatch, slot_num: int):
-        bs = len(batch.seq_lens)
+        bs = len(batch.seq_lens_cpu)
         allocator = self.target_worker.model_runner.token_to_kv_pool_allocator
         req_to_token_pool = self.target_worker.model_runner.req_to_token_pool
         if self.page_size == 1:
@@ -132,17 +132,16 @@ class TiDARWorker(BaseSpecWorker):
             if alloc_indices is not None:
                 offset = 0
                 for i in range(bs):
-                    seq_len_i = int(batch.seq_lens[i].item())
+                    seq_len_i = int(batch.seq_lens_cpu[i].item())
                     req_idx_i = int(batch.req_pool_indices[i].item())
                     vals = alloc_indices[offset : offset + slot_num].to(torch.int32)
                     req_to_token_pool.write((req_idx_i, slice(seq_len_i, seq_len_i + slot_num)), vals)
                     offset += slot_num
         else:
-            assert False
             # Paged allocation using alloc_extend
-            prefix_lens = batch.seq_lens
-            seq_lens_next = batch.seq_lens + slot_num
-            prefix_lens_cpu = batch.seq_lens_cpu if batch.seq_lens_cpu is not None else batch.seq_lens.cpu()
+            prefix_lens = batch.seq_lens_cpu
+            seq_lens_next = batch.seq_lens_cpu + slot_num
+            prefix_lens_cpu = batch.seq_lens_cpu if batch.seq_lens_cpu is not None else batch.seq_lens_cpu.cpu()
             seq_lens_next_cpu = prefix_lens_cpu + slot_num
             last_loc = get_last_loc(
                 req_to_token_pool.req_to_token,
@@ -160,14 +159,14 @@ class TiDARWorker(BaseSpecWorker):
             if alloc_indices is not None:
                 offset = 0
                 for i in range(bs):
-                    seq_len_i = int(batch.seq_lens[i].item())
+                    seq_len_i = int(batch.seq_lens_cpu[i].item())
                     req_idx_i = int(batch.req_pool_indices[i].item())
                     vals = alloc_indices[offset : offset + slot_num].to(torch.int32)
                     req_to_token_pool.write((req_idx_i, slice(seq_len_i, seq_len_i + slot_num)), vals)
                     offset += slot_num
 
     def _free_kv_slots(self, batch: ModelWorkerBatch, accept_index: torch.Tensor, accept_lens: torch.Tensor):
-        bs = len(batch.seq_lens)
+        bs = len(batch.seq_lens_cpu)
         total_slots = int(batch.out_cache_loc.shape[0])
         if total_slots == 0 or bs == 0:
             return
@@ -192,7 +191,6 @@ class TiDARWorker(BaseSpecWorker):
                     self.target_worker.model_runner.token_to_kv_pool_allocator.free(to_free)
                 batch.out_cache_loc = batch.out_cache_loc[accept_index]
             else:
-                assert False
                 if slots_per_req == 1:
                     evict_mask = torch.full((bs * slots_per_req,), True, dtype=torch.bool, device=self.device)
                     evict_mask[accept_index] = False
@@ -231,7 +229,7 @@ class TiDARWorker(BaseSpecWorker):
                     batch.out_cache_loc = tgt_loc
 
         # Update req_to_token mapping for accepted tokens and clear rejected ones
-        pre_seq_lens = batch.seq_lens.clone()
+        pre_seq_lens = batch.seq_lens_cpu.clone()
         if bs > 0:
             req_to_token_pool = self.target_worker.model_runner.req_to_token_pool
             max_ctx = int(req_to_token_pool.req_to_token.shape[1])
@@ -246,7 +244,7 @@ class TiDARWorker(BaseSpecWorker):
                         pos = torch.arange(
                             start_pos,
                             end_pos,
-                            dtype=torch.int64,
+                            dtype=torch.int32,
                             device=self.device,
                         )
                         base = int(accept_lens[:i].sum().item()) + i
@@ -259,7 +257,7 @@ class TiDARWorker(BaseSpecWorker):
                     rej_pos = torch.arange(
                         rej_start,
                         rej_end,
-                        dtype=torch.int64,
+                        dtype=torch.int32,
                         device=self.device,
                     )
                     req_to_token_pool.write((int(batch.req_pool_indices[i].item()), rej_pos), torch.full_like(rej_pos, -1, dtype=torch.int32))
@@ -299,7 +297,8 @@ class TiDARWorker(BaseSpecWorker):
 
         logits_output = forward_out.logits_output
         # first merge the logits
-        bs = len(batch.seq_lens)
+        bs = len(batch.seq_lens_cpu)
+
         logits = logits_output.next_token_logits.view(bs, block_size + 1, block_size, -1).contiguous()
         # TODO: do the logits mixing here
         # logits[:, 1] = logits[:, 0].view(-1) * self.trust_ar_ratio + logits[:, 1:, 0].view(-1) * (1 - self.trust_ar_ratio)
@@ -319,7 +318,7 @@ class TiDARWorker(BaseSpecWorker):
             accept_cnt += 1
 
         # Keep only the first accept_cnt queries' KV; evict the rest
-        accept_lens = torch.full((bs,), accept_cnt, dtype=torch.int64, device=self.device)
+        accept_lens = torch.full((bs,), accept_cnt, dtype=torch.int32, device=self.device)
 
         # Indices to keep per sequence: [0..accept_cnt-1]
         row_offsets = torch.arange(bs, device=self.device) * B
@@ -331,15 +330,15 @@ class TiDARWorker(BaseSpecWorker):
         self._free_kv_slots(batch, accept_index, accept_lens)
 
         # Advance lengths
-        batch.seq_lens.add_(accept_lens)
-        # print(batch.seq_lens)
+        batch.seq_lens.add_(accept_lens.to(batch.seq_lens.dtype))
+        batch.seq_lens_cpu.add_(accept_lens.cpu().to(batch.seq_lens_cpu.dtype))
 
         next_draft_input = TiDARInput(
             draft_token=None,
             positions=None,
             custom_mask=None,
             num_queries=0,
-            send_tokens=select_draft_tokens.view(-1).to(torch.int64).contiguous().clone(),
+            send_tokens=select_draft_tokens.view(-1).to(torch.int32).contiguous().clone(),
             B=block_size,
         )
 

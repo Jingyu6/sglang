@@ -19,7 +19,7 @@ def build_tidar_positions_and_mask_prefill(
     bs = len(seq_lens)
     offsets = torch.arange(block_size, device=device, dtype=torch.long)
     positions = (
-        torch.repeat_interleave(seq_lens.to(torch.long), repeats=block_size)
+        torch.repeat_interleave(seq_lens.to(torch.long).to(device), repeats=block_size)
         + offsets.repeat(bs)
     )
 
@@ -55,7 +55,7 @@ def build_tidar_positions_and_mask_decode(
         + torch.arange(block_size + 1, device=device, dtype=torch.long).unsqueeze(1)
     )[:, :block_size].contiguous().view(-1)
     positions = (
-        torch.repeat_interleave(seq_lens.to(torch.long), repeats=B)
+        torch.repeat_interleave(seq_lens.to(torch.long).to(device), repeats=B)
         + offsets.repeat(bs)
     )
 
