@@ -86,23 +86,23 @@ class TiDARWorker(BaseSpecWorker):
             batch,
             self.target_worker,
         )
+
         forward_out = self.target_worker.forward_batch_generation(
             model_worker_batch=None,
             forward_batch=verify_fb,
             is_verify=True,
             skip_attn_backend_init=False,
         )
+
         logits_output = forward_out.logits_output
         next_token_ids = torch.argmax(logits_output.next_token_logits, dim=-1)
         # print(f"next_token_ids: {next_token_ids}")
         # print("================================================")
 
         # No acceptance at prefill draft stage; keep lengths unchanged
+        empty_idx = torch.empty(0, dtype=torch.int64, device=self.device)
         accept_lens = torch.zeros_like(batch.seq_lens_cpu, dtype=torch.int32)
-
-        empty_idx = torch.empty(0, dtype=torch.int32, device=self.device)
-        empty_lens = torch.zeros_like(batch.seq_lens_cpu, dtype=torch.int32, device=self.device)
-        self._free_kv_slots(batch, empty_idx, empty_lens)
+        self._free_kv_slots(batch, empty_idx, accept_lens)
 
         # Send B draft tokens (no KV cache) to the first decode step
         next_draft_input = TiDARInput(
@@ -124,29 +124,30 @@ class TiDARWorker(BaseSpecWorker):
         )
 
     def _alloc_kv_slots(self, batch: ModelWorkerBatch, slot_num: int):
-        bs = len(batch.seq_lens_cpu)
+        # Assume batch size is always 1
+        assert len(batch.seq_lens_cpu) == 1, "TiDAR only supports batch size 1 for now"
+        if slot_num <= 0:
+            return
         allocator = self.target_worker.model_runner.token_to_kv_pool_allocator
         req_to_token_pool = self.target_worker.model_runner.req_to_token_pool
-        num_tokens = bs * slot_num
-        alloc_indices = allocator.alloc(num_tokens)
-        if alloc_indices is not None:
-            offset = 0
-            for i in range(bs):
-                seq_len_i = int(batch.seq_lens_cpu[i].item())
-                req_idx_i = int(batch.req_pool_indices[i].item())
-                vals = alloc_indices[offset : offset + slot_num].to(torch.int32)
-                req_to_token_pool.write((req_idx_i, slice(seq_len_i, seq_len_i + slot_num)), vals)
-                offset += slot_num
+        alloc_indices = allocator.alloc(slot_num)
+        if alloc_indices is None:
+            return
+        seq_len_0 = int(batch.seq_lens_cpu[0].item())
+        req_idx_0 = int(batch.req_pool_indices[0].item())
+        vals = alloc_indices.to(torch.int32)
+        req_to_token_pool.write((req_idx_0, slice(seq_len_0, seq_len_0 + slot_num)), vals)
         
+
     def _free_kv_slots(self, batch: ModelWorkerBatch, accept_index: torch.Tensor, accept_lens: torch.Tensor):
         """
             accept_index is a flattened index of shape bs * slot_num
         """
-        bs = len(batch.seq_lens_cpu)
+        assert len(batch.seq_lens_cpu) == 1, "TiDAR only supports batch size 1 for now"
         total_slots = int(batch.out_cache_loc.shape[0])
-        if total_slots == 0 or bs == 0:
+        if total_slots == 0:
             return
-        slots_per_req = total_slots // bs
+        slots_per_req = total_slots
 
         # Short-circuit: nothing accepted (e.g., prefill draft cleanup). Free all and skip compaction.
         if accept_index.numel() == 0:
@@ -157,47 +158,38 @@ class TiDARWorker(BaseSpecWorker):
             # Clear out_cache_loc; mapping cleanup happens below
             batch.out_cache_loc = batch.out_cache_loc[:0]
         else:
-            evict_mask = torch.full((bs * slots_per_req,), True, dtype=torch.bool, device=self.device)
+            evict_mask = torch.full((slots_per_req,), True, dtype=torch.bool, device=self.device)
             evict_mask[accept_index] = False
             to_free = batch.out_cache_loc[evict_mask]
             to_free = to_free[to_free > 0]
             if to_free.numel() > 0:
                 self.target_worker.model_runner.token_to_kv_pool_allocator.free(to_free)
             batch.out_cache_loc = batch.out_cache_loc[accept_index]
-        
-        # Update req_to_token mapping for accepted tokens and clear rejected ones
-        pre_seq_lens = batch.seq_lens_cpu
-        if bs > 0:
-            req_to_token_pool = self.target_worker.model_runner.req_to_token_pool
-            max_ctx = int(req_to_token_pool.req_to_token.shape[1])
-            # Accepted locs are grouped per request in batch.out_cache_loc
-            for i in range(bs):
-                acc_len_i = int(accept_lens[i].item())
-                if acc_len_i > 0:
-                    start_pos = int(pre_seq_lens[i].item())
-                    end_pos = min(start_pos + acc_len_i, max_ctx)
-                    if end_pos > start_pos:
-                        keep_len = end_pos - start_pos
-                        pos = torch.arange(
-                            start_pos,
-                            end_pos,
-                            dtype=torch.int32,
-                            device=self.device,
-                        )
-                        base = int(accept_lens[:i].sum().item())
-                        vals = batch.out_cache_loc[base : base + keep_len].to(torch.int32)
-                        req_to_token_pool.write((int(batch.req_pool_indices[i].item()), pos), vals)
-                # Clear mappings for rejected draft slots
-                rej_start = int(pre_seq_lens[i].item()) + acc_len_i
-                rej_end = min(int(pre_seq_lens[i].item()) + slots_per_req, max_ctx)
-                if rej_end > rej_start:
-                    rej_pos = torch.arange(
-                        rej_start,
-                        rej_end,
-                        dtype=torch.int32,
-                        device=self.device,
-                    )
-                    req_to_token_pool.write((int(batch.req_pool_indices[i].item()), rej_pos), torch.full_like(rej_pos, -1, dtype=torch.int32))
+
+        # Update req_to_token mapping for accepted tokens and clear rejected ones (bs = 1)
+        pre_seq_len_0 = int(batch.seq_lens_cpu[0].item())
+        req_to_token_pool = self.target_worker.model_runner.req_to_token_pool
+        max_ctx = int(req_to_token_pool.req_to_token.shape[1])
+        acc_len_0 = int(accept_lens[0].item()) if accept_lens.numel() > 0 else 0
+
+        # Write accepted locations
+        if acc_len_0 > 0:
+            start_pos = pre_seq_len_0
+            end_pos = min(start_pos + acc_len_0, max_ctx)
+            if end_pos > start_pos:
+                keep_len = end_pos - start_pos
+                pos = torch.arange(start_pos, end_pos, dtype=torch.int64, device=self.device)
+                vals = batch.out_cache_loc[:keep_len].to(torch.int32)
+                req_idx_0 = int(batch.req_pool_indices[0].item())
+                req_to_token_pool.write((req_idx_0, pos), vals)
+
+        # Clear mappings for rejected draft slots
+        rej_start = pre_seq_len_0 + acc_len_0
+        rej_end = min(pre_seq_len_0 + slots_per_req, max_ctx)
+        if rej_end > rej_start:
+            rej_pos = torch.arange(rej_start, rej_end, dtype=torch.int64, device=self.device)
+            req_idx_0 = int(batch.req_pool_indices[0].item())
+            req_to_token_pool.write((req_idx_0, rej_pos), torch.full_like(rej_pos, -1, dtype=torch.int32, device=self.device))
 
     def _decode_step(self, batch: ModelWorkerBatch):
         block_size = self.speculative_tidar_b
@@ -225,6 +217,7 @@ class TiDARWorker(BaseSpecWorker):
             batch,
             self.target_worker,
         )
+
         forward_out = self.target_worker.forward_batch_generation(
             model_worker_batch=None,
             forward_batch=verify_fb,
@@ -266,10 +259,15 @@ class TiDARWorker(BaseSpecWorker):
 
         self._free_kv_slots(batch, accept_index, accept_lens)
 
+        print("Before incrementing")
+        print(batch.seq_lens)
+        print(batch.seq_lens_cpu)
+
         # Advance lengths
         batch.seq_lens.add_(accept_lens.to(batch.seq_lens.dtype))
         batch.seq_lens_cpu.add_(accept_lens.cpu().to(batch.seq_lens_cpu.dtype))
 
+        print("After incrementing")
         print(batch.seq_lens)
         print(batch.seq_lens_cpu)
         print("================================================")

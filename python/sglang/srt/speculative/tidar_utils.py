@@ -24,7 +24,7 @@ def build_tidar_positions_and_mask_prefill(
     )
 
     # Placeholder: user should supply planned ids; zeros for scaffold
-    draft_tokens = torch.full((bs * block_size,), mask_token_id, dtype=torch.long, device=device)
+    draft_tokens = torch.full((bs * block_size,), mask_token_id, dtype=torch.int32, device=device)
 
     # TiDAR custom mask: for each sequence b, create a block_size x (seq_len[b] + block_size)
     # mask that is all True, then flatten and concatenate across sequences.
@@ -61,7 +61,7 @@ def build_tidar_positions_and_mask_decode(
 
     draft_token = prev_draft_tokens.view(bs, block_size)
     draft_token = torch.concat(
-        [draft_token, torch.full((bs, block_size * block_size), mask_token_id, device=device)], 
+        [draft_token, torch.full((bs, block_size * block_size), mask_token_id, dtype=torch.int32, device=device)], 
         dim=-1
     ).view(-1)
 
