@@ -56,9 +56,9 @@ class TiDARInput(SpecInput):
         batch.forward_mode = ForwardMode.TARGET_VERIFY
         batch.capture_hidden_mode = CaptureHiddenMode.FULL
 
+        batch.spec_info = self
         forward_batch = ForwardBatch.init_new(batch, target_worker.model_runner)
-        forward_batch.spec_info = self
-        forward_batch.positions = self.positions
+        
         # skip attention backend init because later it will be initialized
         return forward_batch, bool(
             target_worker.model_runner.graph_runner
