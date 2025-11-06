@@ -14,13 +14,6 @@ from sglang.srt.speculative.tidar_utils import (
     build_tidar_positions_and_mask_prefill,
     build_tidar_positions_and_mask_decode,
 )
-from sglang.srt.speculative.eagle_info import (
-    get_src_tgt_cache_loc,
-    get_target_cache_loc,
-    align_evict_mask_to_page_size,
-)
-from sglang.srt.mem_cache.common import get_last_loc
-from sglang.srt.utils.common import next_power_of_2
 
 
 class TiDARWorker(BaseSpecWorker):
@@ -79,7 +72,9 @@ class TiDARWorker(BaseSpecWorker):
         spec_input = TiDARInput(draft_token, positions, custom_mask, num_queries=block_size)
         self.target_worker.model_runner.attn_backend.num_draft_tokens = block_size
 
+        # print("prefill: cache loc before alloc: ", batch.out_cache_loc)
         self._alloc_kv_slots(batch, block_size)
+        # print("prefill: cache loc after alloc: ", batch.out_cache_loc)
 
         verify_fb, can_graph = spec_input.prepare_for_v2_verify(
             self.target_worker.model_runner.req_to_token_pool,
@@ -102,7 +97,11 @@ class TiDARWorker(BaseSpecWorker):
         # No acceptance at prefill draft stage; keep lengths unchanged
         empty_idx = torch.empty(0, dtype=torch.int64, device=self.device)
         accept_lens = torch.zeros_like(batch.seq_lens_cpu, dtype=torch.int32)
+
+        # print("prefill: cache loc before free: ", batch.out_cache_loc)
         self._free_kv_slots(batch, empty_idx, accept_lens)
+        # print("prefill: cache loc after free: ", batch.out_cache_loc)
+        # print("free pages: ", self.target_worker.model_runner.token_to_kv_pool_allocator.free_pages[-block_size:])
 
         # Send B draft tokens (no KV cache) to the first decode step
         next_draft_input = TiDARInput(
@@ -123,6 +122,12 @@ class TiDARWorker(BaseSpecWorker):
             allocate_lens=None,
         )
 
+    def _get_allocate_kv_size(self):
+        allocator = self.target_worker.model_runner.token_to_kv_pool_allocator
+        total_size = allocator.size
+        avail_size = allocator.available_size()
+        return total_size - avail_size
+
     def _alloc_kv_slots(self, batch: ModelWorkerBatch, slot_num: int):
         # Assume batch size is always 1
         assert len(batch.seq_lens_cpu) == 1, "TiDAR only supports batch size 1 for now"
@@ -131,6 +136,7 @@ class TiDARWorker(BaseSpecWorker):
         allocator = self.target_worker.model_runner.token_to_kv_pool_allocator
         req_to_token_pool = self.target_worker.model_runner.req_to_token_pool
         alloc_indices = allocator.alloc(slot_num)
+        # print("alloc_indices: ", alloc_indices)
         if alloc_indices is None:
             return
         seq_len_0 = int(batch.seq_lens_cpu[0].item())
@@ -138,7 +144,6 @@ class TiDARWorker(BaseSpecWorker):
         vals = alloc_indices.to(torch.int32)
         req_to_token_pool.write((req_idx_0, slice(seq_len_0, seq_len_0 + slot_num)), vals)
         
-
     def _free_kv_slots(self, batch: ModelWorkerBatch, accept_index: torch.Tensor, accept_lens: torch.Tensor):
         """
             accept_index is a flattened index of shape bs * slot_num
@@ -189,7 +194,7 @@ class TiDARWorker(BaseSpecWorker):
         if rej_end > rej_start:
             rej_pos = torch.arange(rej_start, rej_end, dtype=torch.int64, device=self.device)
             req_idx_0 = int(batch.req_pool_indices[0].item())
-            req_to_token_pool.write((req_idx_0, rej_pos), torch.full_like(rej_pos, -1, dtype=torch.int32, device=self.device))
+            req_to_token_pool.write((req_idx_0, rej_pos), torch.full_like(rej_pos, 0, dtype=torch.int32, device=self.device))
 
     def _decode_step(self, batch: ModelWorkerBatch):
         block_size = self.speculative_tidar_b
@@ -210,7 +215,10 @@ class TiDARWorker(BaseSpecWorker):
         spec_input = TiDARInput(draft_token, positions, custom_mask, num_queries=B)
         self.target_worker.model_runner.attn_backend.num_draft_tokens = B
 
+        # print("kv used size: ", self._get_allocate_kv_size())
+        # print("decode: cache loc before alloc: ", batch.out_cache_loc)
         self._alloc_kv_slots(batch, B)
+        # print("decode: cache loc after alloc: ", batch.out_cache_loc)
 
         verify_fb, can_graph = spec_input.prepare_for_v2_verify(
             self.target_worker.model_runner.req_to_token_pool,
@@ -218,12 +226,21 @@ class TiDARWorker(BaseSpecWorker):
             self.target_worker,
         )
 
+        print("Before forward")
+        print(batch.seq_lens)
+        print(batch.seq_lens_cpu)
+
         forward_out = self.target_worker.forward_batch_generation(
             model_worker_batch=None,
             forward_batch=verify_fb,
             is_verify=True,
             skip_attn_backend_init=False,
         )
+
+        print("After forward")
+        print(batch.seq_lens)
+        print(batch.seq_lens_cpu)
+        print("================================================")
 
         logits_output = forward_out.logits_output
         # first merge the logits
@@ -257,20 +274,15 @@ class TiDARWorker(BaseSpecWorker):
             for i in range(bs)
         ])
 
+        # print("decode: cache loc before free: ", batch.out_cache_loc)
         self._free_kv_slots(batch, accept_index, accept_lens)
-
-        print("Before incrementing")
-        print(batch.seq_lens)
-        print(batch.seq_lens_cpu)
+        # print("decode: cache loc after free: ", batch.out_cache_loc)
+        # print("free pages: ", self.target_worker.model_runner.token_to_kv_pool_allocator.free_pages[-(B - accept_cnt):])
 
         # Advance lengths
         batch.seq_lens.add_(accept_lens.to(batch.seq_lens.dtype))
         batch.seq_lens_cpu.add_(accept_lens.cpu().to(batch.seq_lens_cpu.dtype))
-
-        print("After incrementing")
-        print(batch.seq_lens)
-        print(batch.seq_lens_cpu)
-        print("================================================")
+        # batch.seq_lens.copy_(batch.seq_lens_cpu.to(batch.seq_lens_cpu.device).to(batch.seq_lens.dtype))
 
         next_draft_input = TiDARInput(
             draft_token=None,
