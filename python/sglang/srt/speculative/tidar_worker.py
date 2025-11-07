@@ -59,7 +59,7 @@ class TiDARWorker(BaseSpecWorker):
             return self._decode_step(model_worker_batch)
         else:
             # Run normal target prefill first (embedding/residual states, etc.)
-            model_worker_batch.capture_hidden_mode = CaptureHiddenMode.FULL
+            model_worker_batch.capture_hidden_mode = CaptureHiddenMode.NULL
             base = self.target_worker.forward_batch_generation(model_worker_batch)
             # Then emit B tokens using TiDAR prefill with custom mask
             return self._prefill_draft_only(model_worker_batch, base)
@@ -76,7 +76,7 @@ class TiDARWorker(BaseSpecWorker):
         self._alloc_kv_slots(batch, block_size)
         # print("prefill: cache loc after alloc: ", batch.out_cache_loc)
 
-        verify_fb, can_graph = spec_input.prepare_for_v2_verify(
+        forward_batch, can_graph = spec_input.prepare_forward_batch(
             self.target_worker.model_runner.req_to_token_pool,
             batch,
             self.target_worker,
@@ -84,7 +84,7 @@ class TiDARWorker(BaseSpecWorker):
 
         forward_out = self.target_worker.forward_batch_generation(
             model_worker_batch=None,
-            forward_batch=verify_fb,
+            forward_batch=forward_batch,
             is_verify=True,
             skip_attn_backend_init=False,
         )
@@ -220,7 +220,7 @@ class TiDARWorker(BaseSpecWorker):
         self._alloc_kv_slots(batch, B)
         # print("decode: cache loc after alloc: ", batch.out_cache_loc)
 
-        verify_fb, can_graph = spec_input.prepare_for_v2_verify(
+        forward_batch, can_graph = spec_input.prepare_forward_batch(
             self.target_worker.model_runner.req_to_token_pool,
             batch,
             self.target_worker,
@@ -232,7 +232,7 @@ class TiDARWorker(BaseSpecWorker):
 
         forward_out = self.target_worker.forward_batch_generation(
             model_worker_batch=None,
-            forward_batch=verify_fb,
+            forward_batch=forward_batch,
             is_verify=True,
             skip_attn_backend_init=False,
         )
