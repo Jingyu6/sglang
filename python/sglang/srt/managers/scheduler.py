@@ -2006,9 +2006,6 @@ class Scheduler(
 
                     batch.spec_info = batch_result.next_draft_input
                     batch.spec_info.future_indices = future_indices
-                elif self.spec_algorithm == SpeculativeAlgorithm.TIDAR:
-                    # Propagate TiDAR draft input between steps
-                    batch.spec_info = batch_result.next_draft_input
 
                     # batch.spec_info = EagleDraftInput(
                     #     future_indices=future_indices,
