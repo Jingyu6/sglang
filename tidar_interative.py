@@ -5,7 +5,14 @@ from sglang.srt.server_args import prepare_server_args, ServerArgs
 
 @function
 def text_gen(s, prompt):
-    s += prompt + gen('response', max_tokens=128)
+    s += prompt + gen(
+        'response', 
+        max_tokens=128, 
+        ignore_eos=True, 
+        stop=[],
+        stop_token_ids=[],
+        n=1
+    )
 
 if __name__ == "__main__":
     server_args = prepare_server_args(["--config", "tidar_8b_config.yaml"])
