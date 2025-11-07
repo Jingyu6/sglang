@@ -14,7 +14,7 @@ from sglang.srt.model_executor.forward_batch_info import (
     ForwardMode,
 )
 from sglang.srt.speculative.base_spec_worker import BaseSpecWorker
-from sglang.srt.speculative.spec_utils import assign_draft_cache_locs, next_power_of_2
+from sglang.srt.speculative.spec_utils import assign_req_to_token_pool_func
 from sglang.srt.speculative.tidar_info import TiDARInput
 from sglang.srt.speculative.tidar_utils import (
     build_tidar_positions_and_mask_decode,
@@ -45,10 +45,6 @@ class TiDARWorker(BaseSpecWorker):
         assert 0 <= self.trust_ar_ratio <= 1, "trust_ar_ratio must be between 0 and 1"
         assert self.page_size == 1, "TiDAR only supports page size 1 for now"
 
-        # for API consistency
-        self.num_new_pages_per_topk = torch.empty((), dtype=torch.int64, device=self.device)
-        self.extend_lens = torch.empty((), dtype=torch.int64, device=self.device)
-
     @property
     def target_worker(self):
         return self._target_worker
@@ -72,6 +68,32 @@ class TiDARWorker(BaseSpecWorker):
             # Then emit B tokens using TiDAR prefill with custom mask
             return self._prefill_draft_only(batch, base)
 
+    def _alloc_kv_slots(self, batch: ScheduleBatch, slot_size: int):
+        batch.out_cache_loc = alloc_token_slots(
+            batch.tree_cache,
+            slot_size,
+        )
+
+        bs = batch.batch_size()
+        assign_req_to_token_pool_func(
+            batch.req_pool_indices,
+            batch.req_to_token_pool.req_to_token,
+            batch.seq_lens,
+            batch.seq_lens + slot_size,
+            batch.out_cache_loc,
+            bs,
+        )
+
+    def _prepare_forward_batch(self, batch: ScheduleBatch, spec_input: TiDARInput):
+        # get model worker batch
+        model_worker_batch = batch.get_model_worker_batch()
+        # get the forward batch
+        model_worker_batch.forward_mode = ForwardMode.TARGET_VERIFY
+        model_worker_batch.capture_hidden_mode = CaptureHiddenMode.NULL
+        model_worker_batch.input_ids = spec_input.draft_token
+        model_worker_batch.spec_info = spec_input
+        return ForwardBatch.init_new(model_worker_batch, self.target_worker.model_runner)
+
     def _prefill_draft_only(self, batch: ScheduleBatch, base: GenerationBatchResult):
         block_size = self.speculative_tidar_b
         draft_token, positions, custom_mask = build_tidar_positions_and_mask_prefill(
@@ -84,37 +106,10 @@ class TiDARWorker(BaseSpecWorker):
         self.target_worker.model_runner.attn_backend.num_draft_tokens = block_size
 
         # alloc KV slots
-        out_cache_loc = alloc_token_slots(
-            batch.tree_cache, 
-            block_size
-        )
-
-        assign_draft_cache_locs[(1, )] (
-            batch.req_pool_indices, 
-            batch.req_to_token_pool.req_to_token,
-            batch.seq_lens,
-            self.extend_lens, 
-            self.num_new_pages_per_topk,
-            out_cache_loc,
-            batch.req_to_token_pool.req_to_token.shape[1],
-            1, 
-            block_size,
-            self.page_size, 
-            1, 
-            next_power_of_2(block_size)
-        )
-
-        batch.out_cache_loc = out_cache_loc
-        batch.return_hidden_states = False
-        # get model worker batch
-        model_worker_batch = batch.get_model_worker_batch()
-        # get the forward batch
-        model_worker_batch.forward_mode = ForwardMode.TARGET_VERIFY
-        model_worker_batch.capture_hidden_mode = CaptureHiddenMode.NULL
-        model_worker_batch.input_ids = draft_token
-        model_worker_batch.spec_info = spec_input
-        forward_batch = ForwardBatch.init_new(model_worker_batch, self.target_worker.model_runner)
-
+        self._alloc_kv_slots(batch, block_size)
+        # prepare forward batch
+        forward_batch = self._prepare_forward_batch(batch, spec_input)
+        # model forward
         forward_out = self.target_worker.forward_batch_generation(
             model_worker_batch=None,
             forward_batch=forward_batch,
@@ -172,41 +167,10 @@ class TiDARWorker(BaseSpecWorker):
         self.target_worker.model_runner.attn_backend.num_draft_tokens = B
 
         # alloc KV slots
-        out_cache_loc = alloc_token_slots(
-            batch.tree_cache, 
-            B
-        )
-
-        assign_draft_cache_locs[(1, )] (
-            batch.req_pool_indices, 
-            batch.req_to_token_pool.req_to_token,
-            batch.seq_lens,
-            self.extend_lens, 
-            self.num_new_pages_per_topk,
-            out_cache_loc,
-            batch.req_to_token_pool.req_to_token.shape[1],
-            1, 
-            B,
-            self.page_size, 
-            1, 
-            next_power_of_2(B)
-        )
-
-        batch.out_cache_loc = out_cache_loc
-        batch.return_hidden_states = False
-        # get model worker batch
-        model_worker_batch = batch.get_model_worker_batch()
-        # get the forward batch
-        model_worker_batch.forward_mode = ForwardMode.TARGET_VERIFY
-        model_worker_batch.capture_hidden_mode = CaptureHiddenMode.NULL
-        model_worker_batch.input_ids = draft_token
-        model_worker_batch.spec_info = spec_input
-        forward_batch = ForwardBatch.init_new(model_worker_batch, self.target_worker.model_runner)
-
-        # print("Before forward")
-        # print(batch.seq_lens)
-        # print(batch.seq_lens_cpu)
-
+        self._alloc_kv_slots(batch, B)
+        # prepare forward batch
+        forward_batch = self._prepare_forward_batch(batch, spec_input)
+        # model forward
         forward_out = self.target_worker.forward_batch_generation(
             model_worker_batch=None,
             forward_batch=forward_batch,
