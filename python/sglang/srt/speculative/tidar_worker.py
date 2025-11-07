@@ -4,11 +4,15 @@ from typing import Optional
 
 import torch
 
-from sglang.srt.managers.schedule_batch import ModelWorkerBatch, ScheduleBatch
+from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.managers.tp_worker import TpModelWorker
 from sglang.srt.managers.utils import GenerationBatchResult
 from sglang.srt.mem_cache.common import alloc_token_slots
-from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode
+from sglang.srt.model_executor.forward_batch_info import (
+    CaptureHiddenMode,
+    ForwardBatch,
+    ForwardMode,
+)
 from sglang.srt.speculative.base_spec_worker import BaseSpecWorker
 from sglang.srt.speculative.spec_utils import assign_draft_cache_locs, next_power_of_2
 from sglang.srt.speculative.tidar_info import TiDARInput
@@ -105,13 +109,8 @@ class TiDARWorker(BaseSpecWorker):
         # get model worker batch
         model_worker_batch = batch.get_model_worker_batch()
         # get the forward batch
-        from sglang.srt.model_executor.forward_batch_info import (
-            ForwardBatch,
-            ForwardMode,
-        )
         model_worker_batch.forward_mode = ForwardMode.TARGET_VERIFY
         model_worker_batch.capture_hidden_mode = CaptureHiddenMode.NULL
-
         model_worker_batch.input_ids = draft_token
         model_worker_batch.spec_info = spec_input
         forward_batch = ForwardBatch.init_new(model_worker_batch, self.target_worker.model_runner)
@@ -198,13 +197,8 @@ class TiDARWorker(BaseSpecWorker):
         # get model worker batch
         model_worker_batch = batch.get_model_worker_batch()
         # get the forward batch
-        from sglang.srt.model_executor.forward_batch_info import (
-            ForwardBatch,
-            ForwardMode,
-        )
         model_worker_batch.forward_mode = ForwardMode.TARGET_VERIFY
         model_worker_batch.capture_hidden_mode = CaptureHiddenMode.NULL
-
         model_worker_batch.input_ids = draft_token
         model_worker_batch.spec_info = spec_input
         forward_batch = ForwardBatch.init_new(model_worker_batch, self.target_worker.model_runner)
