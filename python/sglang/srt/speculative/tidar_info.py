@@ -37,7 +37,7 @@ class TiDARInput(SpecInput):
     def get_spec_adjust_token_coefficient(self) -> Tuple[int, int]:
         return self.num_queries, self.num_queries
 
-    def prepare_for_v2_verify(self, req_to_token_pool, batch, target_worker):
+    def prepare_forward_batch(self, req_to_token_pool, batch, target_worker):
         bs = len(batch.seq_lens)
         device = batch.seq_lens.device
 
@@ -54,7 +54,7 @@ class TiDARInput(SpecInput):
 
         # Route through verify (prefill wrappers) and override positions
         batch.forward_mode = ForwardMode.TARGET_VERIFY
-        batch.capture_hidden_mode = CaptureHiddenMode.FULL
+        batch.capture_hidden_mode = CaptureHiddenMode.NULL
 
         batch.spec_info = self
         forward_batch = ForwardBatch.init_new(batch, target_worker.model_runner)
