@@ -397,19 +397,7 @@ class SchedulerOutputProcessorMixin:
             req.check_finished(new_accepted_len)
 
             if req.finished():
-                if batch.spec_algorithm == SpeculativeAlgorithm.TIDAR:
-                    # TiDAR finalization: free all KV for full output length (no delayed token semantics),
-                    # and release req/locks without going through tree_cache frees to avoid len-1 semantics.
-                    total_kv = len(req.origin_input_ids) + len(req.output_ids)
-                    if total_kv > 0:
-                        indices_to_free = self.req_to_token_pool.req_to_token[req.req_pool_idx][:total_kv]
-                        self.token_to_kv_pool_allocator.free(indices_to_free)
-                    # Release req slot in req_to_token_pool
-                    self.req_to_token_pool.free(req.req_pool_idx)
-                    # Release radix lock refs acquired during prefill/updates
-                    self.tree_cache.dec_lock_ref(req.last_node)
-                    req.time_stats.completion_time = time.perf_counter()
-                elif batch.is_v2_eagle and self.cur_batch.forward_mode.is_extend():
+                if batch.is_v2_eagle and self.cur_batch.forward_mode.is_extend():
                     # FIXME(lsyin): fix the messy logic here
                     # 1) when not overlap (v2 impl), we free the extra tokens in the req
                     # 2) overlap eagle and the current batch is prefill. This seq will not run extra iteration.
@@ -428,9 +416,8 @@ class SchedulerOutputProcessorMixin:
                     # Asynchronously offload KV cache; cache_finished_req will be called after Device->Host transfer completes
                     if not self.decode_offload_manager.offload_kv_cache(req):
                         self.tree_cache.cache_finished_req(req)
-                else:
-                    if batch.spec_algorithm != SpeculativeAlgorithm.TIDAR:
-                        self.tree_cache.cache_finished_req(req)
+                elif batch.spec_algorithm != SpeculativeAlgorithm.TIDAR:
+                    self.tree_cache.cache_finished_req(req)
 
                 req.time_stats.completion_time = time.perf_counter()
 

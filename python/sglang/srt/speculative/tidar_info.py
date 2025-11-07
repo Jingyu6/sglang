@@ -37,34 +37,6 @@ class TiDARInput(SpecInput):
     def get_spec_adjust_token_coefficient(self) -> Tuple[int, int]:
         return self.num_queries, self.num_queries
 
-    def prepare_forward_batch(self, req_to_token_pool, batch, target_worker):
-        bs = len(batch.seq_lens)
-        device = batch.seq_lens.device
-
-        batch.input_ids = self.draft_token
-        batch.out_cache_loc = assign_extend_cache_locs_func(
-            batch.req_pool_indices,
-            req_to_token_pool.req_to_token,
-            batch.seq_lens,
-            batch.seq_lens + self.num_queries,
-            bs,
-            self.num_queries,
-            device,
-        )
-
-        # Route through verify (prefill wrappers) and override positions
-        batch.forward_mode = ForwardMode.TARGET_VERIFY
-        batch.capture_hidden_mode = CaptureHiddenMode.NULL
-
-        batch.spec_info = self
-        forward_batch = ForwardBatch.init_new(batch, target_worker.model_runner)
-        
-        # skip attention backend init because later it will be initialized
-        return forward_batch, bool(
-            target_worker.model_runner.graph_runner
-            and target_worker.model_runner.graph_runner.can_run(forward_batch)
-        )
-
     # Consumed by FlashInferIndicesUpdaterPrefill.call_begin_forward
     def generate_attn_arg_prefill(
         self,

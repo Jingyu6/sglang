@@ -1453,9 +1453,7 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                     state.last_output_offset = len(state.output_ids)
                 else:
                     state.output_ids.extend(recv_obj.output_ids[i])
-                    # Truncate to reported completion_tokens (respects finished_len/max_new_tokens)
-                    max_return = recv_obj.completion_tokens[i]
-                    output_token_ids = state.output_ids[:max_return].copy()
+                    output_token_ids = state.output_ids.copy()
 
                 out_dict = {
                     "text": state.text,

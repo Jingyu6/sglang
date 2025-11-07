@@ -5,14 +5,16 @@ from typing import Optional
 import torch
 
 from sglang.srt.managers.schedule_batch import ModelWorkerBatch, ScheduleBatch
-from sglang.srt.managers.utils import GenerationBatchResult
 from sglang.srt.managers.tp_worker import TpModelWorker
+from sglang.srt.managers.utils import GenerationBatchResult
+from sglang.srt.mem_cache.common import alloc_token_slots
 from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode
 from sglang.srt.speculative.base_spec_worker import BaseSpecWorker
+from sglang.srt.speculative.spec_utils import assign_draft_cache_locs, next_power_of_2
 from sglang.srt.speculative.tidar_info import TiDARInput
 from sglang.srt.speculative.tidar_utils import (
-    build_tidar_positions_and_mask_prefill,
     build_tidar_positions_and_mask_decode,
+    build_tidar_positions_and_mask_prefill,
 )
 
 
@@ -39,6 +41,10 @@ class TiDARWorker(BaseSpecWorker):
         assert 0 <= self.trust_ar_ratio <= 1, "trust_ar_ratio must be between 0 and 1"
         assert self.page_size == 1, "TiDAR only supports page size 1 for now"
 
+        # for API consistency
+        self.num_new_pages_per_topk = torch.empty((), dtype=torch.int64, device=self.device)
+        self.extend_lens = torch.empty((), dtype=torch.int64, device=self.device)
+
     @property
     def target_worker(self):
         return self._target_worker
@@ -51,36 +57,64 @@ class TiDARWorker(BaseSpecWorker):
     def clear_cache_pool(self):
         pass
 
-    def forward_batch_generation(self, model_worker_batch: ModelWorkerBatch | ScheduleBatch):
-        if isinstance(model_worker_batch, ScheduleBatch):
-            model_worker_batch = model_worker_batch.get_model_worker_batch()
-
-        if model_worker_batch.forward_mode.is_decode():
-            return self._decode_step(model_worker_batch)
+    def forward_batch_generation(self, batch: ScheduleBatch):
+        if batch.forward_mode.is_decode():
+            return self._decode_step(batch)
         else:
             # Run normal target prefill first (embedding/residual states, etc.)
+            model_worker_batch = batch.get_model_worker_batch()
             model_worker_batch.capture_hidden_mode = CaptureHiddenMode.NULL
             base = self.target_worker.forward_batch_generation(model_worker_batch)
             # Then emit B tokens using TiDAR prefill with custom mask
-            return self._prefill_draft_only(model_worker_batch, base)
+            return self._prefill_draft_only(batch, base)
 
-    def _prefill_draft_only(self, batch: ModelWorkerBatch, base: GenerationBatchResult):
+    def _prefill_draft_only(self, batch: ScheduleBatch, base: GenerationBatchResult):
         block_size = self.speculative_tidar_b
         draft_token, positions, custom_mask = build_tidar_positions_and_mask_prefill(
-            seq_lens=batch.seq_lens_cpu, block_size=block_size, mask_token_id=self.mask_token_id, device=self.device
+            seq_lens=batch.seq_lens_cpu, 
+            block_size=block_size, 
+            mask_token_id=self.mask_token_id, 
+            device=self.device
         )
         spec_input = TiDARInput(draft_token, positions, custom_mask, num_queries=block_size)
         self.target_worker.model_runner.attn_backend.num_draft_tokens = block_size
 
-        # print("prefill: cache loc before alloc: ", batch.out_cache_loc)
-        self._alloc_kv_slots(batch, block_size)
-        # print("prefill: cache loc after alloc: ", batch.out_cache_loc)
-
-        forward_batch, can_graph = spec_input.prepare_forward_batch(
-            self.target_worker.model_runner.req_to_token_pool,
-            batch,
-            self.target_worker,
+        # alloc KV slots
+        out_cache_loc = alloc_token_slots(
+            batch.tree_cache, 
+            block_size
         )
+
+        assign_draft_cache_locs[(1, )] (
+            batch.req_pool_indices, 
+            batch.req_to_token_pool.req_to_token,
+            batch.seq_lens,
+            self.extend_lens, 
+            self.num_new_pages_per_topk,
+            out_cache_loc,
+            batch.req_to_token_pool.req_to_token.shape[1],
+            1, 
+            block_size,
+            self.page_size, 
+            1, 
+            next_power_of_2(block_size)
+        )
+
+        batch.out_cache_loc = out_cache_loc
+        batch.return_hidden_states = False
+        # get model worker batch
+        model_worker_batch = batch.get_model_worker_batch()
+        # get the forward batch
+        from sglang.srt.model_executor.forward_batch_info import (
+            ForwardBatch,
+            ForwardMode,
+        )
+        model_worker_batch.forward_mode = ForwardMode.TARGET_VERIFY
+        model_worker_batch.capture_hidden_mode = CaptureHiddenMode.NULL
+
+        model_worker_batch.input_ids = draft_token
+        model_worker_batch.spec_info = spec_input
+        forward_batch = ForwardBatch.init_new(model_worker_batch, self.target_worker.model_runner)
 
         forward_out = self.target_worker.forward_batch_generation(
             model_worker_batch=None,
@@ -94,15 +128,9 @@ class TiDARWorker(BaseSpecWorker):
         # print(f"next_token_ids: {next_token_ids}")
         # print("================================================")
 
-        # No acceptance at prefill draft stage; keep lengths unchanged
-        empty_idx = torch.empty(0, dtype=torch.int64, device=self.device)
-        accept_lens = torch.zeros_like(batch.seq_lens_cpu, dtype=torch.int32)
-
-        # print("prefill: cache loc before free: ", batch.out_cache_loc)
-        self._free_kv_slots(batch, empty_idx, accept_lens)
-        # print("prefill: cache loc after free: ", batch.out_cache_loc)
-        # print("free pages: ", self.target_worker.model_runner.token_to_kv_pool_allocator.free_pages[-block_size:])
-
+        # clean all cache
+        batch.tree_cache.token_to_kv_pool_allocator.free(batch.out_cache_loc)
+        
         # Send B draft tokens (no KV cache) to the first decode step
         next_draft_input = TiDARInput(
             draft_token=None,
@@ -118,85 +146,14 @@ class TiDARWorker(BaseSpecWorker):
             next_token_ids=base.next_token_ids, # dummy
             can_run_cuda_graph=base.can_run_cuda_graph,
             next_draft_input=next_draft_input,
-            accept_lens=accept_lens,
+            accept_lens=None,
             allocate_lens=None,
         )
 
-    def _get_allocate_kv_size(self):
-        allocator = self.target_worker.model_runner.token_to_kv_pool_allocator
-        total_size = allocator.size
-        avail_size = allocator.available_size()
-        return total_size - avail_size
+    def _decode_step(self, batch: ScheduleBatch):
+        max_new_tokens = batch.reqs[0].sampling_params.max_new_tokens
+        max_extra_tokens = max_new_tokens - len(batch.reqs[0].output_ids)
 
-    def _alloc_kv_slots(self, batch: ModelWorkerBatch, slot_num: int):
-        # Assume batch size is always 1
-        assert len(batch.seq_lens_cpu) == 1, "TiDAR only supports batch size 1 for now"
-        if slot_num <= 0:
-            return
-        allocator = self.target_worker.model_runner.token_to_kv_pool_allocator
-        req_to_token_pool = self.target_worker.model_runner.req_to_token_pool
-        alloc_indices = allocator.alloc(slot_num)
-        # print("alloc_indices: ", alloc_indices)
-        if alloc_indices is None:
-            return
-        seq_len_0 = int(batch.seq_lens_cpu[0].item())
-        req_idx_0 = int(batch.req_pool_indices[0].item())
-        vals = alloc_indices.to(torch.int32)
-        req_to_token_pool.write((req_idx_0, slice(seq_len_0, seq_len_0 + slot_num)), vals)
-        
-    def _free_kv_slots(self, batch: ModelWorkerBatch, accept_index: torch.Tensor, accept_lens: torch.Tensor):
-        """
-            accept_index is a flattened index of shape bs * slot_num
-        """
-        assert len(batch.seq_lens_cpu) == 1, "TiDAR only supports batch size 1 for now"
-        total_slots = int(batch.out_cache_loc.shape[0])
-        if total_slots == 0:
-            return
-        slots_per_req = total_slots
-
-        # Short-circuit: nothing accepted (e.g., prefill draft cleanup). Free all and skip compaction.
-        if accept_index.numel() == 0:
-            to_free_all = batch.out_cache_loc
-            to_free_all = to_free_all[to_free_all > 0]
-            if to_free_all.numel() > 0:
-                self.target_worker.model_runner.token_to_kv_pool_allocator.free(to_free_all)
-            # Clear out_cache_loc; mapping cleanup happens below
-            batch.out_cache_loc = batch.out_cache_loc[:0]
-        else:
-            evict_mask = torch.full((slots_per_req,), True, dtype=torch.bool, device=self.device)
-            evict_mask[accept_index] = False
-            to_free = batch.out_cache_loc[evict_mask]
-            to_free = to_free[to_free > 0]
-            if to_free.numel() > 0:
-                self.target_worker.model_runner.token_to_kv_pool_allocator.free(to_free)
-            batch.out_cache_loc = batch.out_cache_loc[accept_index]
-
-        # Update req_to_token mapping for accepted tokens and clear rejected ones (bs = 1)
-        pre_seq_len_0 = int(batch.seq_lens_cpu[0].item())
-        req_to_token_pool = self.target_worker.model_runner.req_to_token_pool
-        max_ctx = int(req_to_token_pool.req_to_token.shape[1])
-        acc_len_0 = int(accept_lens[0].item()) if accept_lens.numel() > 0 else 0
-
-        # Write accepted locations
-        if acc_len_0 > 0:
-            start_pos = pre_seq_len_0
-            end_pos = min(start_pos + acc_len_0, max_ctx)
-            if end_pos > start_pos:
-                keep_len = end_pos - start_pos
-                pos = torch.arange(start_pos, end_pos, dtype=torch.int64, device=self.device)
-                vals = batch.out_cache_loc[:keep_len].to(torch.int32)
-                req_idx_0 = int(batch.req_pool_indices[0].item())
-                req_to_token_pool.write((req_idx_0, pos), vals)
-
-        # Clear mappings for rejected draft slots
-        rej_start = pre_seq_len_0 + acc_len_0
-        rej_end = min(pre_seq_len_0 + slots_per_req, max_ctx)
-        if rej_end > rej_start:
-            rej_pos = torch.arange(rej_start, rej_end, dtype=torch.int64, device=self.device)
-            req_idx_0 = int(batch.req_pool_indices[0].item())
-            req_to_token_pool.write((req_idx_0, rej_pos), torch.full_like(rej_pos, 0, dtype=torch.int32, device=self.device))
-
-    def _decode_step(self, batch: ModelWorkerBatch):
         block_size = self.speculative_tidar_b
         B = block_size * (block_size + 1)
 
@@ -215,20 +172,46 @@ class TiDARWorker(BaseSpecWorker):
         spec_input = TiDARInput(draft_token, positions, custom_mask, num_queries=B)
         self.target_worker.model_runner.attn_backend.num_draft_tokens = B
 
-        # print("kv used size: ", self._get_allocate_kv_size())
-        # print("decode: cache loc before alloc: ", batch.out_cache_loc)
-        self._alloc_kv_slots(batch, B)
-        # print("decode: cache loc after alloc: ", batch.out_cache_loc)
-
-        forward_batch, can_graph = spec_input.prepare_forward_batch(
-            self.target_worker.model_runner.req_to_token_pool,
-            batch,
-            self.target_worker,
+        # alloc KV slots
+        out_cache_loc = alloc_token_slots(
+            batch.tree_cache, 
+            B
         )
 
-        print("Before forward")
-        print(batch.seq_lens)
-        print(batch.seq_lens_cpu)
+        assign_draft_cache_locs[(1, )] (
+            batch.req_pool_indices, 
+            batch.req_to_token_pool.req_to_token,
+            batch.seq_lens,
+            self.extend_lens, 
+            self.num_new_pages_per_topk,
+            out_cache_loc,
+            batch.req_to_token_pool.req_to_token.shape[1],
+            1, 
+            B,
+            self.page_size, 
+            1, 
+            next_power_of_2(B)
+        )
+
+        batch.out_cache_loc = out_cache_loc
+        batch.return_hidden_states = False
+        # get model worker batch
+        model_worker_batch = batch.get_model_worker_batch()
+        # get the forward batch
+        from sglang.srt.model_executor.forward_batch_info import (
+            ForwardBatch,
+            ForwardMode,
+        )
+        model_worker_batch.forward_mode = ForwardMode.TARGET_VERIFY
+        model_worker_batch.capture_hidden_mode = CaptureHiddenMode.NULL
+
+        model_worker_batch.input_ids = draft_token
+        model_worker_batch.spec_info = spec_input
+        forward_batch = ForwardBatch.init_new(model_worker_batch, self.target_worker.model_runner)
+
+        # print("Before forward")
+        # print(batch.seq_lens)
+        # print(batch.seq_lens_cpu)
 
         forward_out = self.target_worker.forward_batch_generation(
             model_worker_batch=None,
@@ -237,10 +220,10 @@ class TiDARWorker(BaseSpecWorker):
             skip_attn_backend_init=False,
         )
 
-        print("After forward")
-        print(batch.seq_lens)
-        print(batch.seq_lens_cpu)
-        print("================================================")
+        # print("After forward")
+        # print(batch.seq_lens)
+        # print(batch.seq_lens_cpu)
+        # print("================================================")
 
         logits_output = forward_out.logits_output
         # first merge the logits
@@ -259,25 +242,30 @@ class TiDARWorker(BaseSpecWorker):
         select_draft_tokens = new_draft_tokens[0, 1] # we default to the first new draft set
 
         while accept_cnt < block_size:
-            if new_draft_tokens[0, 0, accept_cnt - 1].item() != verify_tokens[0, accept_cnt].item():
+            if new_draft_tokens[0, 0, accept_cnt - 1] != verify_tokens[0, accept_cnt]:
                 break
             select_draft_tokens = new_draft_tokens[0, accept_cnt + 1]
             accept_cnt += 1
 
+        # clean cache
+        if accept_cnt < max_extra_tokens:
+            # intermediate decoding step
+            batch.tree_cache.token_to_kv_pool_allocator.free(batch.out_cache_loc[accept_cnt:])
+        else:
+            # last decoding step, clean everything
+            cur_req = batch.reqs[0]
+            kv_indices = batch.tree_cache.req_to_token_pool.req_to_token[
+                cur_req.req_pool_idx, 
+                # this is very weird though
+                : len(cur_req.origin_input_ids) + len(cur_req.output_ids) + B
+            ]
+            batch.tree_cache.req_to_token_pool.free(cur_req.req_pool_idx)
+            batch.tree_cache.token_to_kv_pool_allocator.free(kv_indices)
+            batch.tree_cache.protected_size_ -= len(cur_req.prefix_indices)
+            accept_cnt = max_extra_tokens
+        
         # Keep only the first accept_cnt queries' KV; evict the rest
         accept_lens = torch.full((bs,), accept_cnt, dtype=torch.int32, device=self.device)
-
-        # Indices to keep per sequence: [0..accept_cnt-1]
-        row_offsets = torch.arange(bs, device=self.device) * B
-        accept_index = torch.cat([
-            row_offsets[i] + torch.arange(0, accept_lens[i].item(), device=self.device)
-            for i in range(bs)
-        ])
-
-        # print("decode: cache loc before free: ", batch.out_cache_loc)
-        self._free_kv_slots(batch, accept_index, accept_lens)
-        # print("decode: cache loc after free: ", batch.out_cache_loc)
-        # print("free pages: ", self.target_worker.model_runner.token_to_kv_pool_allocator.free_pages[-(B - accept_cnt):])
 
         # Advance lengths
         batch.seq_lens.add_(accept_lens.to(batch.seq_lens.dtype))
@@ -306,7 +294,7 @@ class TiDARWorker(BaseSpecWorker):
             logits_output=logits_output,
             next_token_ids=accept_tokens,
             num_accepted_tokens=total_accepted,
-            can_run_cuda_graph=can_graph,
+            can_run_cuda_graph=False,
             next_draft_input=next_draft_input,
             accept_lens=accept_lens,
             allocate_lens=None,
