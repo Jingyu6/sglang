@@ -9,5 +9,4 @@ enable-metrics: true
 log-requests: true
 disable-cuda-graph: true
 chunked-prefill-size: -1
-preferred-sampling-params: '{"temperature": 0.0, "n": 1}'
 disable-radix-cache: true

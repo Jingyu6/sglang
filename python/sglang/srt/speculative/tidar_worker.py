@@ -69,6 +69,7 @@ class TiDARWorker(BaseSpecWorker):
             return self._prefill_draft_only(batch, base)
 
     def _alloc_kv_slots(self, batch: ScheduleBatch, slot_size: int):
+        assert batch.batch_size() == 1, "TiDAR only supports batch size 1 for now"
         batch.out_cache_loc = alloc_token_slots(
             batch.tree_cache,
             slot_size,
@@ -222,13 +223,15 @@ class TiDARWorker(BaseSpecWorker):
             batch.tree_cache.protected_size_ -= len(cur_req.prefix_indices)
             accept_cnt = max_extra_tokens
         
+        # print free slots
+        self._print_free_slots(batch)
+
         # Keep only the first accept_cnt queries' KV; evict the rest
         accept_lens = torch.full((bs,), accept_cnt, dtype=torch.int32, device=self.device)
 
         # Advance lengths
         batch.seq_lens.add_(accept_lens.to(batch.seq_lens.dtype))
         batch.seq_lens_cpu.add_(accept_lens.cpu().to(batch.seq_lens_cpu.dtype))
-        # batch.seq_lens.copy_(batch.seq_lens_cpu.to(batch.seq_lens_cpu.device).to(batch.seq_lens.dtype))
 
         next_draft_input = TiDARInput(
             draft_token=None,
@@ -257,3 +260,8 @@ class TiDARWorker(BaseSpecWorker):
             accept_lens=accept_lens,
             allocate_lens=None,
         )
+
+    def _print_free_slots(self, batch: ScheduleBatch):
+        available_size = batch.token_to_kv_pool_allocator.available_size()
+        total_size = batch.token_to_kv_pool_allocator.size
+        print(f"total size: {total_size}, free slots: {available_size}, Allocated: {total_size - available_size}")
