@@ -69,13 +69,18 @@ class TiDARWorker(BaseSpecWorker):
             return self._prefill_draft_only(batch, base)
 
     def _alloc_kv_slots(self, batch: ScheduleBatch, slot_size: int):
-        assert batch.batch_size() == 1, "TiDAR only supports batch size 1 for now"
+        bs = len(batch.seq_lens_cpu)
+        assert bs == 1, "TiDAR only supports batch size 1 for now"
         batch.out_cache_loc = alloc_token_slots(
             batch.tree_cache,
             slot_size,
         )
 
-        bs = batch.batch_size()
+        # print(batch.req_pool_indices)
+        # print(batch.seq_lens)
+        # print(batch.out_cache_loc)
+        # print("================================================")
+
         assign_req_to_token_pool_func(
             batch.req_pool_indices,
             batch.req_to_token_pool.req_to_token,
@@ -93,6 +98,10 @@ class TiDARWorker(BaseSpecWorker):
         model_worker_batch.capture_hidden_mode = CaptureHiddenMode.NULL
         model_worker_batch.input_ids = spec_input.draft_token
         model_worker_batch.spec_info = spec_input
+        # populate fields needed by overlap/cuda-graph slicing
+        spec_input.seq_lens_cpu = batch.seq_lens_cpu
+        spec_input.seq_lens_sum = int(batch.seq_lens_cpu.sum().item())
+        spec_input.draft_token_num = spec_input.num_queries
         return ForwardBatch.init_new(model_worker_batch, self.target_worker.model_runner)
 
     def _prefill_draft_only(self, batch: ScheduleBatch, base: GenerationBatchResult):
@@ -126,21 +135,11 @@ class TiDARWorker(BaseSpecWorker):
         # clean all cache
         batch.tree_cache.token_to_kv_pool_allocator.free(batch.out_cache_loc)
         
-        # Send B draft tokens (no KV cache) to the first decode step
-        next_draft_input = TiDARInput(
-            draft_token=None,
-            positions=None,
-            custom_mask=None,
-            num_queries=0,
-            send_tokens=next_token_ids.to(torch.int32).contiguous().clone(),
-            B=block_size,
-        )
-
         return GenerationBatchResult(
             logits_output=base.logits_output, # dummy
             next_token_ids=base.next_token_ids, # dummy
             can_run_cuda_graph=base.can_run_cuda_graph,
-            next_draft_input=next_draft_input,
+            next_draft_input=next_token_ids.to(torch.int32).contiguous().clone(),
             accept_lens=None,
             allocate_lens=None,
         )
@@ -154,7 +153,8 @@ class TiDARWorker(BaseSpecWorker):
 
         # get the previous draft tokens
         assert batch.spec_info is not None, "Missing draft tokens from the previous step"
-        prev_draft_tokens = batch.spec_info.send_tokens
+        prev_draft_tokens = batch.spec_info.clone()
+        batch.spec_info = None
 
         draft_token, positions, custom_mask = build_tidar_positions_and_mask_decode(
             seq_lens=batch.seq_lens_cpu, 
@@ -163,6 +163,9 @@ class TiDARWorker(BaseSpecWorker):
             mask_token_id=self.mask_token_id, 
             device=self.device
         )
+
+        # print(f"positions shape: {positions.shape}")
+        # print(f"positions min/max: {positions.min()}/{positions.max()}")
 
         spec_input = TiDARInput(draft_token, positions, custom_mask, num_queries=B)
         self.target_worker.model_runner.attn_backend.num_draft_tokens = B
@@ -188,7 +191,7 @@ class TiDARWorker(BaseSpecWorker):
         # first merge the logits
         bs = len(batch.seq_lens_cpu)
 
-        logits = logits_output.next_token_logits.view(bs, block_size + 1, block_size, -1).contiguous()
+        logits = logits_output.next_token_logits.clone().view(bs, block_size + 1, block_size, -1).contiguous()
         # TODO: do the logits mixing here
         # logits[:, 1] = logits[:, 0].view(-1) * self.trust_ar_ratio + logits[:, 1:, 0].view(-1) * (1 - self.trust_ar_ratio)
         # sampling here
@@ -224,7 +227,7 @@ class TiDARWorker(BaseSpecWorker):
             accept_cnt = max_extra_tokens
         
         # print free slots
-        self._print_free_slots(batch)
+        # self._print_free_slots(batch)
 
         # Keep only the first accept_cnt queries' KV; evict the rest
         accept_lens = torch.full((bs,), accept_cnt, dtype=torch.int32, device=self.device)
@@ -232,15 +235,6 @@ class TiDARWorker(BaseSpecWorker):
         # Advance lengths
         batch.seq_lens.add_(accept_lens.to(batch.seq_lens.dtype))
         batch.seq_lens_cpu.add_(accept_lens.cpu().to(batch.seq_lens_cpu.dtype))
-
-        next_draft_input = TiDARInput(
-            draft_token=None,
-            positions=None,
-            custom_mask=None,
-            num_queries=0,
-            send_tokens=select_draft_tokens.view(-1).to(torch.int32).contiguous().clone(),
-            B=block_size,
-        )
 
         accept_tokens = verify_tokens[0, :accept_cnt].view(-1)
         total_accepted = int(accept_lens.sum().item()) - bs # - bs to make the metric consistent
@@ -256,7 +250,7 @@ class TiDARWorker(BaseSpecWorker):
             next_token_ids=accept_tokens,
             num_accepted_tokens=total_accepted,
             can_run_cuda_graph=False,
-            next_draft_input=next_draft_input,
+            next_draft_input=select_draft_tokens.clone().view(-1).contiguous().to(torch.int32),
             accept_lens=accept_lens,
             allocate_lens=None,
         )

@@ -30,7 +30,7 @@ def build_tidar_positions_and_mask_prefill(
     # mask that is all True, then flatten and concatenate across sequences.
     # Since it's fully True per row, we can allocate directly by total length.
     total_mask_len = int(block_size * seq_lens.sum().item() + bs * block_size * block_size)
-    custom_mask = torch.ones((total_mask_len,), dtype=torch.bool, device=device)
+    custom_mask = torch.ones((total_mask_len,), dtype=torch.uint8, device=device)
     return draft_tokens.contiguous(), positions.contiguous(), custom_mask.contiguous()
 
 
@@ -68,16 +68,16 @@ def build_tidar_positions_and_mask_decode(
     # TODO: lets start with a single for loop and later on optimize it
     masks = []
     for i in range(bs):
-        prefix_mask = torch.full((B, seq_lens[i].item()), 1, dtype=torch.bool, device=device)
-        draft_mask = torch.zeros((B, B), dtype=torch.bool, device=device)
+        prefix_mask = torch.full((B, seq_lens[i].item()), 1, dtype=torch.uint8, device=device)
+        draft_mask = torch.zeros((B, B), dtype=torch.uint8, device=device)
         # first triangular mask
         draft_mask[:block_size, :block_size] = torch.tril(
-            torch.ones((block_size, block_size), dtype=torch.bool, device=device)
+            torch.ones((block_size, block_size), dtype=torch.uint8, device=device)
         )
         # diagonal block with size B
         for j in range(1, block_size + 1):
-            draft_mask[j * block_size:(j + 1) * block_size, j * block_size:(j + 1) * block_size] = torch.ones((block_size, block_size), dtype=torch.bool, device=device)
-            draft_mask[j * block_size:(j + 1) * block_size, :j] = torch.ones((block_size, j), dtype=torch.bool, device=device)
+            draft_mask[j * block_size:(j + 1) * block_size, j * block_size:(j + 1) * block_size] = torch.ones((block_size, block_size), dtype=torch.uint8, device=device)
+            draft_mask[j * block_size:(j + 1) * block_size, :j] = torch.ones((block_size, j), dtype=torch.uint8, device=device)
         
         masks.append(
             torch.concat(
