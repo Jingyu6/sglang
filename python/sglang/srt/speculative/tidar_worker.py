@@ -139,7 +139,7 @@ class TiDARWorker(BaseSpecWorker):
             logits_output=base.logits_output, # dummy
             next_token_ids=base.next_token_ids, # dummy
             can_run_cuda_graph=base.can_run_cuda_graph,
-            next_draft_input=next_token_ids.to(torch.int32).contiguous().clone(),
+            next_draft_input=next_token_ids.to(torch.int32),
             accept_lens=None,
             allocate_lens=None,
         )
@@ -191,7 +191,7 @@ class TiDARWorker(BaseSpecWorker):
         # first merge the logits
         bs = len(batch.seq_lens_cpu)
 
-        logits = logits_output.next_token_logits.clone().view(bs, block_size + 1, block_size, -1).contiguous()
+        logits = logits_output.next_token_logits.view(bs, block_size + 1, block_size, -1)
         # TODO: do the logits mixing here
         # logits[:, 1] = logits[:, 0].view(-1) * self.trust_ar_ratio + logits[:, 1:, 0].view(-1) * (1 - self.trust_ar_ratio)
         # sampling here
@@ -250,7 +250,7 @@ class TiDARWorker(BaseSpecWorker):
             next_token_ids=accept_tokens,
             num_accepted_tokens=total_accepted,
             can_run_cuda_graph=False,
-            next_draft_input=select_draft_tokens.clone().view(-1).contiguous().to(torch.int32),
+            next_draft_input=select_draft_tokens.view(-1).to(torch.int32),
             accept_lens=accept_lens,
             allocate_lens=None,
         )
