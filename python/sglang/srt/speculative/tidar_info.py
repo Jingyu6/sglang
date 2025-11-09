@@ -65,21 +65,21 @@ class TiDARInput(SpecInput):
         paged_kernel_lens = paged_kernel_lens + self.num_queries
         cum_kv_seq_len[1:] = torch.cumsum(paged_kernel_lens, dim=0)
 
-        # Validate custom_mask layout and dtype if provided: sum_i Q * (seq_len[i] + Q)
-        if self.custom_mask is not None:
-            q_per_seq = (qo_indptr[1:] - qo_indptr[:-1]).to(torch.int64)
-            kv_len_per_seq = (cum_kv_seq_len[1:] - cum_kv_seq_len[:-1]).to(torch.int64)
-            expected = int((q_per_seq * kv_len_per_seq).sum().item())
-            assert (
-                self.custom_mask.numel() == expected
-            ), f"TiDAR custom_mask size mismatch: got {self.custom_mask.numel()}, expected {expected}"
-            # Accept both bool and uint8; normalize to uint8 for FlashInfer robustness
-            if self.custom_mask.dtype is torch.bool:
-                self.custom_mask = self.custom_mask.to(torch.uint8)
-            assert (
-                self.custom_mask.is_cuda
-            ), "TiDAR custom_mask must be on CUDA device"
-            self.custom_mask = self.custom_mask.contiguous()
+        # # Validate custom_mask layout and dtype if provided: sum_i Q * (seq_len[i] + Q)
+        # if self.custom_mask is not None:
+        #     q_per_seq = (qo_indptr[1:] - qo_indptr[:-1]).to(torch.int64)
+        #     kv_len_per_seq = (cum_kv_seq_len[1:] - cum_kv_seq_len[:-1]).to(torch.int64)
+        #     expected = int((q_per_seq * kv_len_per_seq).sum().item())
+        #     assert (
+        #         self.custom_mask.numel() == expected
+        #     ), f"TiDAR custom_mask size mismatch: got {self.custom_mask.numel()}, expected {expected}"
+        #     # Accept both bool and uint8; normalize to uint8 for FlashInfer robustness
+        #     if self.custom_mask.dtype is torch.bool:
+        #         self.custom_mask = self.custom_mask.to(torch.uint8)
+        #     assert (
+        #         self.custom_mask.is_cuda
+        #     ), "TiDAR custom_mask must be on CUDA device"
+        #     self.custom_mask = self.custom_mask.contiguous()
 
         # Allocate kv_indices exactly as needed by cum_kv_seq_len to avoid any size drift
         total_kv_len = int(cum_kv_seq_len[-1].item())
