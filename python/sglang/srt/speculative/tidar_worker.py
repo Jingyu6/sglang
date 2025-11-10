@@ -162,7 +162,7 @@ class TiDARWorker(BaseSpecWorker):
 
         # get the previous draft tokens
         assert batch.spec_info is not None, "Missing draft tokens from the previous step"
-        prev_draft_tokens = batch.spec_info.clone()
+        prev_draft_tokens = batch.spec_info
         batch.spec_info = None
 
         draft_token, positions, custom_mask = build_tidar_positions_and_mask_decode(
