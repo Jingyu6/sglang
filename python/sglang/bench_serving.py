@@ -543,6 +543,7 @@ async def async_request_sglang_generate(
         st = time.perf_counter()
         most_recent_timestamp = st
         last_output_len = 0
+        saw_prefill_ttft = False
         try:
             async with session.post(
                 url=api_url, json=payload, headers=headers
@@ -559,6 +560,17 @@ async def async_request_sglang_generate(
                             pass
                         else:
                             data = json.loads(chunk)
+
+                            # For TiDAR: prefill emits a zero-token chunk before first decode.
+                            # Count TTFT at this prefill boundary even though no text is produced.
+                            if ttft == 0.0:
+                                timestamp = time.perf_counter()
+                                if isinstance(data.get("output_ids"), list) and len(data["output_ids"]) == 0:
+                                    ttft = timestamp - st
+                                    output.ttft = ttft
+                                    most_recent_timestamp = timestamp
+                                    saw_prefill_ttft = True
+                                    continue
 
                             # NOTE: Some completion API might have a last
                             # usage summary response without a token so we
@@ -578,9 +590,14 @@ async def async_request_sglang_generate(
                                     num_new_tokens = output_len - last_output_len
                                     if num_new_tokens == 0:
                                         continue
-                                    chunk_gap = timestamp - most_recent_timestamp
-                                    adjust_itl = chunk_gap / num_new_tokens
-                                    output.itl.extend([adjust_itl] * num_new_tokens)
+                                    # If we already marked TTFT on a zero-token prefill chunk (TiDAR),
+                                    # skip attributing prefill->first-decode delay to ITL.
+                                    if saw_prefill_ttft and last_output_len == 0:
+                                        saw_prefill_ttft = False
+                                    else:
+                                        chunk_gap = timestamp - most_recent_timestamp
+                                        adjust_itl = chunk_gap / num_new_tokens
+                                        output.itl.extend([adjust_itl] * num_new_tokens)
 
                                 most_recent_timestamp = timestamp
                                 last_output_len = output_len
