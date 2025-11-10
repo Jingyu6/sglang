@@ -306,10 +306,12 @@ class SchedulerOutputProcessorMixin:
             next_token_ids = next_token_ids.tolist()
             if batch.return_logprob:
                 next_token_logprobs = logits_output.next_token_logprobs.tolist()
+            self.num_generated_tokens += len(batch.reqs)
         elif batch.is_v2_eagle:
             next_token_ids = self._resolve_spec_overlap_token_ids(result, batch)
             allocate_lens_list = result.allocate_lens.tolist()
             accept_lens_list = result.accept_lens.tolist()
+            self.num_generated_tokens += len(batch.reqs)
         elif batch.spec_algorithm == SpeculativeAlgorithm.TIDAR:
             # TiDAR multi-accept path: next_token_ids is flattened across reqs; split by accept_lens
             accept_lens_list = result.accept_lens.tolist()
@@ -329,16 +331,8 @@ class SchedulerOutputProcessorMixin:
             self.spec_num_accepted_tokens += result.num_accepted_tokens
             self.spec_num_forward_ct += 1
             self.num_generated_tokens += result.num_accepted_tokens
-
-        if batch.spec_algorithm.is_none():
-            self.num_generated_tokens += len(batch.reqs)
-        elif batch.is_v2_eagle:
-            self.update_spec_metrics(batch.batch_size(), result.num_accepted_tokens)
-            self.num_generated_tokens += len(batch.reqs)
-        elif batch.spec_algorithm == SpeculativeAlgorithm.TIDAR:
-            # updated above already
-            pass
-        if not batch.spec_algorithm.is_none() and batch.is_v2_eagle:
+        
+        if not batch.spec_algorithm.is_none() and batch.spec_algorithm != SpeculativeAlgorithm.TIDAR:
             self.update_spec_metrics(batch.batch_size(), result.num_accepted_tokens)
 
         self.token_to_kv_pool_allocator.free_group_begin()
