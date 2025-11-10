@@ -142,6 +142,7 @@ class TiDARWorker(BaseSpecWorker):
             next_draft_input=next_token_ids.to(torch.int32),
             accept_lens=None,
             allocate_lens=None,
+            num_accepted_tokens=0, # because we didn't produce any real token during prefill
         )
 
     def _decode_step(self, batch: ScheduleBatch):
@@ -231,7 +232,7 @@ class TiDARWorker(BaseSpecWorker):
             batch.tree_cache.req_to_token_pool.free(cur_req.req_pool_idx)
             batch.tree_cache.token_to_kv_pool_allocator.free(kv_indices)
             batch.tree_cache.protected_size_ -= len(cur_req.prefix_indices)
-            accept_cnt = max_extra_tokens
+            accept_cnt = max_extra_tokens # trim off extra tokens
         
         # print free slots
         # self._print_free_slots(batch)
@@ -244,7 +245,7 @@ class TiDARWorker(BaseSpecWorker):
         batch.seq_lens_cpu.add_(accept_lens.cpu().to(batch.seq_lens_cpu.dtype))
 
         accept_tokens = verify_tokens[0, :accept_cnt].view(-1)
-        total_accepted = int(accept_lens.sum().item()) - bs # - bs to make the metric consistent
+        total_accepted = int(accept_lens.sum().item())
         assert total_accepted >= 0, "Total accepted tokens must be non-negative"
 
         # print(f"prev_draft_tokens: {prev_draft_tokens}")

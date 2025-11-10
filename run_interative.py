@@ -3,7 +3,7 @@ from sglang import function, gen, Runtime
 from sglang.srt.server_args import prepare_server_args, ServerArgs
 
 
-MAX_TOKENS = 128
+MAX_TOKENS = 512
 
 @function
 def text_gen(s, prompt):

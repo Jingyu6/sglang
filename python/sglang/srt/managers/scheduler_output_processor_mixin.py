@@ -323,8 +323,12 @@ class SchedulerOutputProcessorMixin:
             for k in accept_lens_list:
                 next_token_ids.append(flat_ids[off : off + k])
                 off += k
-            # Update speculative metrics: use worker-provided value for consistency
-            self.update_spec_metrics(batch.batch_size(), result.num_accepted_tokens)
+            # we write custom logic here for consistency
+            # assume bs = 1 for simplicity now
+            # for tidar, spec is the base model itself, so their values should be the same
+            self.spec_num_accepted_tokens += result.num_accepted_tokens
+            self.spec_num_forward_ct += 1
+            self.num_generated_tokens += result.num_accepted_tokens
 
         if batch.spec_algorithm.is_none():
             self.num_generated_tokens += len(batch.reqs)
@@ -332,8 +336,8 @@ class SchedulerOutputProcessorMixin:
             self.update_spec_metrics(batch.batch_size(), result.num_accepted_tokens)
             self.num_generated_tokens += len(batch.reqs)
         elif batch.spec_algorithm == SpeculativeAlgorithm.TIDAR:
-            # TiDAR multi-accept: count actual accepted tokens
-            self.num_generated_tokens += sum(accept_lens_list)
+            # updated above already
+            pass
         if not batch.spec_algorithm.is_none() and batch.is_v2_eagle:
             self.update_spec_metrics(batch.batch_size(), result.num_accepted_tokens)
 
