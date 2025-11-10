@@ -1,4 +1,5 @@
 model-path: /lustre/fsw/portfolios/nvr/users/jinliu/megatron_exp/tidar_8b_sglang
+served-model-name: tidar_8b
 host: 0.0.0.0
 port: 30000
 speculative-tidar-b: 16
