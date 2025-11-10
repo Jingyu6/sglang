@@ -63,7 +63,7 @@ class TiDARWorker(BaseSpecWorker):
         else:
             # Run normal target prefill first (embedding/residual states, etc.)
             model_worker_batch = batch.get_model_worker_batch()
-            model_worker_batch.capture_hidden_mode = CaptureHiddenMode.NULL
+            model_worker_batch.capture_hidden_mode = CaptureHiddenMode.LAST # to disable cuda graph
             base = self.target_worker.forward_batch_generation(model_worker_batch)
             # Then emit B tokens using TiDAR prefill with custom mask
             return self._prefill_draft_only(batch, base)
@@ -90,12 +90,20 @@ class TiDARWorker(BaseSpecWorker):
             bs,
         )
 
-    def _prepare_forward_batch(self, batch: ScheduleBatch, spec_input: TiDARInput):
+    def _prepare_forward_batch(
+        self, 
+        batch: ScheduleBatch, 
+        spec_input: TiDARInput, 
+        is_decode: bool = True
+    ) -> ForwardBatch:
         # get model worker batch
         model_worker_batch = batch.get_model_worker_batch()
         # get the forward batch
         model_worker_batch.forward_mode = ForwardMode.TARGET_VERIFY
-        model_worker_batch.capture_hidden_mode = CaptureHiddenMode.NULL
+        # this is only a trick now to disable cuda graph for prefill
+        model_worker_batch.capture_hidden_mode = (
+            CaptureHiddenMode.NULL if is_decode else CaptureHiddenMode.LAST
+        )
         model_worker_batch.input_ids = spec_input.draft_token
         model_worker_batch.spec_info = spec_input
         # populate fields needed by overlap/cuda-graph slicing
@@ -118,7 +126,7 @@ class TiDARWorker(BaseSpecWorker):
         # alloc KV slots
         self._alloc_kv_slots(batch, block_size)
         # prepare forward batch
-        forward_batch = self._prepare_forward_batch(batch, spec_input)
+        forward_batch = self._prepare_forward_batch(batch, spec_input, is_decode=False)
         # model forward
         forward_out = self.target_worker.forward_batch_generation(
             model_worker_batch=None,
@@ -175,20 +183,28 @@ class TiDARWorker(BaseSpecWorker):
         self._alloc_kv_slots(batch, B)
         # prepare forward batch
         forward_batch = self._prepare_forward_batch(batch, spec_input)
-        # model forward
-        forward_out = self.target_worker.forward_batch_generation(
-            model_worker_batch=None,
-            forward_batch=forward_batch,
-            is_verify=True,
-            skip_attn_backend_init=False,
-        )
+        # model forward (prefer CUDA graph if available)
+        logits_output = None
+        can_run_cuda_graph = False
+        cuda_graph_runner = getattr(self.target_worker.model_runner, "graph_runner", None)
+        if cuda_graph_runner and cuda_graph_runner.can_run(forward_batch):
+            logits_output = cuda_graph_runner.replay(forward_batch)
+            can_run_cuda_graph = True
+        else:
+            forward_out = self.target_worker.forward_batch_generation(
+                model_worker_batch=None,
+                forward_batch=forward_batch,
+                is_verify=True,
+                skip_attn_backend_init=False,
+            )
+            logits_output = forward_out.logits_output
+            can_run_cuda_graph = forward_out.can_run_cuda_graph
 
         # print("After forward")
         # print(batch.seq_lens)
         # print(batch.seq_lens_cpu)
         # print("================================================")
 
-        logits_output = forward_out.logits_output
         # first merge the logits
         bs = len(batch.seq_lens_cpu)
 
@@ -257,7 +273,7 @@ class TiDARWorker(BaseSpecWorker):
             logits_output=logits_output,
             next_token_ids=accept_tokens,
             num_accepted_tokens=total_accepted,
-            can_run_cuda_graph=False,
+            can_run_cuda_graph=can_run_cuda_graph,
             next_draft_input=select_draft_tokens.view(-1).to(torch.int32),
             accept_lens=accept_lens,
             allocate_lens=None,
