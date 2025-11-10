@@ -29,6 +29,7 @@ class TiDARInput(SpecInput):
     draft_token_num: Optional[int] = None
     seq_lens_cpu: Optional[torch.Tensor] = None
     seq_lens_sum: Optional[int] = None
+    capture_hidden_mode: CaptureHiddenMode = CaptureHiddenMode.NULL
 
     def __post_init__(self):
         # If carrying tokens across steps, mark as draft; else mark as verify

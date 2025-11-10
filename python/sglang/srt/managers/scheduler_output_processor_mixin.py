@@ -108,7 +108,7 @@ class SchedulerOutputProcessorMixin:
 
                 if req.is_chunked <= 0:
                     # TiDAR prefill should NOT append a token; it only prepares draft tokens for decode
-                    if batch.spec_algorithm == SpeculativeAlgorithm.TIDAR:
+                    if batch.spec_algorithm.is_tidar():
                         trace_slice(
                             RequestStage.PREFILL_FORWARD,
                             req.rid,
@@ -312,7 +312,7 @@ class SchedulerOutputProcessorMixin:
             allocate_lens_list = result.allocate_lens.tolist()
             accept_lens_list = result.accept_lens.tolist()
             self.num_generated_tokens += len(batch.reqs)
-        elif batch.spec_algorithm == SpeculativeAlgorithm.TIDAR:
+        elif batch.spec_algorithm.is_tidar():
             # TiDAR multi-accept path: next_token_ids is flattened across reqs; split by accept_lens
             accept_lens_list = result.accept_lens.tolist()
             flat_ids = (
@@ -387,7 +387,7 @@ class SchedulerOutputProcessorMixin:
                 # Only v2 eagle's output_ids are updated here.
                 req.output_ids.extend(next_token_id)
                 new_accepted_len = len(next_token_id)
-            elif batch.spec_algorithm == SpeculativeAlgorithm.TIDAR:
+            elif batch.spec_algorithm.is_tidar():
                 # TiDAR multi-accept path
                 req.output_ids.extend(next_token_id)
                 new_accepted_len = len(next_token_id)
@@ -410,7 +410,7 @@ class SchedulerOutputProcessorMixin:
                     ][start_p:end_p]
                     self.token_to_kv_pool_allocator.free(indices_to_free)
 
-                if batch.spec_algorithm != SpeculativeAlgorithm.TIDAR and self.server_args.disaggregation_decode_enable_offload_kvcache:
+                if batch.spec_algorithm.is_tidar() and self.server_args.disaggregation_decode_enable_offload_kvcache:
                     # Asynchronously offload KV cache; cache_finished_req will be called after Device->Host transfer completes
                     if not self.decode_offload_manager.offload_kv_cache(req):
                         self.tree_cache.cache_finished_req(req)

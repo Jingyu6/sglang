@@ -173,6 +173,9 @@ class SpeculativeAlgorithm(metaclass=_SpeculativeAlgorithmMeta):
     def is_ngram(self) -> bool:
         return self._has_flag("NGRAM")
 
+    def is_tidar(self) -> bool:
+        return self._has_flag("TIDAR")
+
     def create_draft_worker(self, **factory_kwargs: Any) -> Any:
         if self._draft_worker_factory is None:
             return None
@@ -189,6 +192,7 @@ _FLAG_MARKERS: Dict[str, Callable[[Union[SpeculativeAlgorithm, str]], None]] = {
         "STANDALONE", algorithm
     ),
     "NGRAM": lambda algorithm: SpeculativeAlgorithm._add_flag("NGRAM", algorithm),
+    "TIDAR": lambda algorithm: SpeculativeAlgorithm._add_flag("TIDAR", algorithm),
 }
 
 
@@ -325,6 +329,7 @@ register_speculative_algorithm(
 register_speculative_algorithm(
     "TIDAR",
     worker_cls=_create_tidar_worker,
+    flags=("TIDAR",),
 )
 
 

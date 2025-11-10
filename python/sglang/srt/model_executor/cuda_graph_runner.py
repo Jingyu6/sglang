@@ -275,6 +275,12 @@ class CudaGraphRunner:
                 self.num_tokens_per_bs = (
                     self.model_runner.server_args.speculative_num_draft_tokens
                 )
+        elif self.model_runner.spec_algorithm.is_tidar():
+            self.capture_forward_mode = ForwardMode.TARGET_VERIFY
+            self.num_tokens_per_bs = (
+                self.model_runner.server_args.speculative_tidar_b * 
+                (self.model_runner.server_args.speculative_tidar_b + 1)
+            )
 
         # If returning hidden states is enabled, set initial capture hidden mode to full to avoid double-capture on startup
         if model_runner.server_args.enable_return_hidden_states:
@@ -853,7 +859,18 @@ class CudaGraphRunner:
 
     def get_spec_info(self, num_tokens: int):
         spec_info = None
-        if (
+        if self.model_runner.spec_algorithm.is_tidar():
+            from sglang.srt.speculative.tidar_info import TiDARInput
+            spec_info = TiDARInput(
+                draft_token=None, 
+                positions=None, 
+                custom_mask=self.custom_mask,
+                num_queries=self.num_tokens_per_bs, # assume bs = 1
+                seq_lens_sum=None,
+                seq_lens_cpu=None,
+            )
+            
+        elif (
             self.model_runner.spec_algorithm.is_eagle()
             or self.model_runner.spec_algorithm.is_standalone()
         ):
