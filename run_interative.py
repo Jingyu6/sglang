@@ -18,7 +18,7 @@ def text_gen(s, prompt):
 
 if __name__ == "__main__":
     model_name = input("Enter the model name: ")
-    assert model_name in ["tidar", "qwen3"], "Invalid model name"
+    assert model_name in ["tidar", "qwen3", "qwen3_eagle"], "Invalid model name"
     server_args = prepare_server_args(["--config", f"{model_name}_8b_config.yaml"])
     # Only pass dataclass fields (exclude computed attrs like model_config)
     _field_names = {f.name for f in dataclasses.fields(ServerArgs)}
