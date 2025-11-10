@@ -28,6 +28,10 @@ if __name__ == "__main__":
     while True:
         print('='*100)
         prompt = input("Enter a prompt: ")
+        if prompt == "input": 
+            print("Reading input from input.txt")
+            with open("tmp.txt", "r") as f:
+                prompt = f.read()
         response = text_gen.run(prompt=prompt, backend=runtime)
         print(response['response'])
         print('='*100)
