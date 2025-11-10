@@ -41,7 +41,7 @@ class TiDARWorker(BaseSpecWorker):
         # TiDAR parameters
         self.speculative_tidar_b = server_args.speculative_tidar_b
         self.mask_token_id = 151662
-        self.trust_ar_ratio = 0.0
+        self.trust_ar_ratio = 0
         assert 0 <= self.trust_ar_ratio <= 1, "trust_ar_ratio must be between 0 and 1"
         assert self.page_size == 1, "TiDAR only supports page size 1 for now"
 
@@ -192,8 +192,15 @@ class TiDARWorker(BaseSpecWorker):
         bs = len(batch.seq_lens_cpu)
 
         logits = logits_output.next_token_logits.view(bs, block_size + 1, block_size, -1)
-        # TODO: do the logits mixing here
-        # logits[:, 1] = logits[:, 0].view(-1) * self.trust_ar_ratio + logits[:, 1:, 0].view(-1) * (1 - self.trust_ar_ratio)
+        """
+        logits[:, 0] is AR predictions
+        logits[:, 1:] is diffusion predictions
+        """
+        # logits mixing here
+        logits[0, 0] = (
+            logits[0, 0] * self.trust_ar_ratio + 
+            logits[0, 1:, 0] * (1 - self.trust_ar_ratio)
+        )
         # sampling here
         verify_tokens = prev_draft_tokens.view(bs, block_size) # [bs, block_size]
         new_draft_tokens = torch.argmax(logits, dim=-1)        # [bs, block_size + 1, block_size]
