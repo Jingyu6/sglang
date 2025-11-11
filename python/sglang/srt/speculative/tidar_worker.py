@@ -110,7 +110,20 @@ class TiDARWorker(BaseSpecWorker):
         spec_input.seq_lens_cpu = batch.seq_lens_cpu
         spec_input.seq_lens_sum = int(batch.seq_lens_cpu.sum().item())
         spec_input.draft_token_num = spec_input.num_queries
-        return ForwardBatch.init_new(model_worker_batch, self.target_worker.model_runner)
+        forward_batch = ForwardBatch.init_new(model_worker_batch, self.target_worker.model_runner)
+        
+        # Run attention backend plan and cuda graph preparation
+        can_run_cuda_graph = bool(
+            self.target_worker.model_runner.graph_runner
+            and self.target_worker.model_runner.graph_runner.can_run(forward_batch)
+        )
+        if can_run_cuda_graph:
+            self.target_worker.model_runner.graph_runner.replay_prepare(forward_batch)
+        else:
+            self.target_worker.model_runner.attn_backend.init_forward_metadata(
+                forward_batch
+            )
+        return forward_batch
 
     def _prefill_draft_only(self, batch: ScheduleBatch, base: GenerationBatchResult):
         block_size = self.speculative_tidar_b
@@ -132,7 +145,7 @@ class TiDARWorker(BaseSpecWorker):
             model_worker_batch=None,
             forward_batch=forward_batch,
             is_verify=True,
-            skip_attn_backend_init=False,
+            skip_attn_backend_init=True,
         )
 
         logits_output = forward_out.logits_output
@@ -195,7 +208,7 @@ class TiDARWorker(BaseSpecWorker):
                 model_worker_batch=None,
                 forward_batch=forward_batch,
                 is_verify=True,
-                skip_attn_backend_init=False,
+                skip_attn_backend_init=True,
             )
             logits_output = forward_out.logits_output
             can_run_cuda_graph = forward_out.can_run_cuda_graph

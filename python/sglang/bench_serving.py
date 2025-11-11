@@ -758,6 +758,7 @@ def get_dataset(args, tokenizer, model_id=None):
             dataset_path=args.dataset_path,
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
+            fixed_output_len=args.sharegpt_output_len,
         )
         # overwrite back
         args.dataset_name = "sharegpt"
@@ -1210,6 +1211,7 @@ def sample_sharegpt_single_turn_requests(
     dataset_path: str,
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
+    fixed_output_len: Optional[int] = None,
 ) -> List[DatasetRow]:
     assert is_file_valid_json(dataset_path)
 
@@ -1234,7 +1236,7 @@ def sample_sharegpt_single_turn_requests(
             DatasetRow(
                 prompt=prompt,
                 prompt_len=prompt_len,
-                output_len=512, # will be overwritten later
+                output_len=fixed_output_len, # will be overwritten later
             )
         )
 
