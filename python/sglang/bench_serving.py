@@ -761,6 +761,15 @@ def get_dataset(args, tokenizer, model_id=None):
             prompt_suffix=args.prompt_suffix,
             apply_chat_template=args.apply_chat_template,
         )
+    elif args.dataset_name == "sharegpt-single-turn":
+        assert not tokenize_prompt
+        input_requests = sample_sharegpt_single_turn_requests(
+            dataset_path=args.dataset_path,
+            num_requests=args.num_prompts,
+            tokenizer=tokenizer,
+        )
+        # overwrite back
+        args.dataset_name = "sharegpt"
     elif args.dataset_name.startswith("random"):
         input_requests = sample_random_requests(
             input_len=args.random_input_len,
@@ -1198,6 +1207,43 @@ def sample_sharegpt_requests(
                 prompt=prompt,
                 prompt_len=prompt_len,
                 output_len=output_len,
+            )
+        )
+
+    print(f"#Input tokens: {np.sum([x.prompt_len for x in filtered_dataset])}")
+    print(f"#Output tokens: {np.sum([x.output_len for x in filtered_dataset])}")
+    return filtered_dataset
+
+
+def sample_sharegpt_single_turn_requests(
+    dataset_path: str,
+    num_requests: int,
+    tokenizer: PreTrainedTokenizerBase,
+) -> List[DatasetRow]:
+    assert is_file_valid_json(dataset_path)
+
+    # Load the dataset.
+    with open(dataset_path) as f:
+        dataset = json.load(f)
+
+    # Shuffle the dataset.
+    random.shuffle(dataset)
+
+    # Filter out sequences that are too long or too short
+    filtered_dataset: List[DatasetRow] = []
+    for i in range(len(dataset)):
+        if len(filtered_dataset) == num_requests:
+            break
+
+        # Tokenize the prompts and completions.
+        prompt = dataset[i]["conversations"][0]["value"]
+        prompt_token_ids = tokenizer.encode(prompt)
+        prompt_len = len(prompt_token_ids)
+        filtered_dataset.append(
+            DatasetRow(
+                prompt=prompt,
+                prompt_len=prompt_len,
+                output_len=512, # will be overwritten later
             )
         )
 
@@ -2377,6 +2423,7 @@ if __name__ == "__main__":
         default="sharegpt",
         choices=[
             "sharegpt",
+            "sharegpt-single-turn", 
             "random",
             "random-ids",
             "generated-shared-prefix",

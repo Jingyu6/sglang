@@ -5,8 +5,8 @@ port: 30000
 speculative-tidar-b: 16
 max-running-requests: 1
 disable-overlap-schedule: true
-enable-metrics: true
-log-requests: true
+# enable-metrics: true
+# log-requests: true
 # disable-cuda-graph: true
 cuda-graph-max-bs: 1
 chunked-prefill-size: -1
