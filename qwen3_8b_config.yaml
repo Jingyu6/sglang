@@ -4,8 +4,8 @@ host: 0.0.0.0
 port: 30000
 max-running-requests: 1
 disable-overlap-schedule: true
-enable-metrics: true
-log-requests: true
+# enable-metrics: true
+# log-requests: true
 # disable-cuda-graph: true
 cuda-graph-max-bs: 1
 chunked-prefill-size: -1

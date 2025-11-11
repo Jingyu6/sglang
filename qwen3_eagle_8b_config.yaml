@@ -10,8 +10,8 @@ speculative-num-draft-tokens: 32
 mem-fraction: 0.9
 max-running-requests: 1
 disable-overlap-schedule: true
-enable-metrics: true
-log-requests: true
+# enable-metrics: true
+# log-requests: true
 # disable-cuda-graph: true
 cuda-graph-max-bs: 1
 chunked-prefill-size: -1
