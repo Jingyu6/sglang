@@ -47,7 +47,7 @@ from transformers import (
 ASSISTANT_SUFFIX = "Assistant:"
 
 global args
-
+global is_tidar
 
 # don't want to import sglang package here
 def _get_bool_env_var(name: str, default: str = "false") -> bool:
@@ -269,6 +269,14 @@ async def async_request_openai_completions(
                                 output_len = (data.get("usage") or {}).get(
                                     "completion_tokens", output_len
                                 )
+                            elif is_tidar:
+                                # this is special handling for tidar
+                                # because it emits a zero-token chunk before first decode.
+                                timestamp = time.perf_counter()
+                                if ttft == 0.0:
+                                    ttft = time.perf_counter() - st
+                                    output.ttft = ttft
+                                most_recent_timestamp = timestamp
 
                     output.generated_text = generated_text
                     output.success = True
@@ -543,7 +551,6 @@ async def async_request_sglang_generate(
         st = time.perf_counter()
         most_recent_timestamp = st
         last_output_len = 0
-        saw_prefill_ttft = False
         try:
             async with session.post(
                 url=api_url, json=payload, headers=headers
@@ -560,17 +567,6 @@ async def async_request_sglang_generate(
                             pass
                         else:
                             data = json.loads(chunk)
-
-                            # For TiDAR: prefill emits a zero-token chunk before first decode.
-                            # Count TTFT at this prefill boundary even though no text is produced.
-                            if ttft == 0.0:
-                                timestamp = time.perf_counter()
-                                if isinstance(data.get("output_ids"), list) and len(data["output_ids"]) == 0:
-                                    ttft = timestamp - st
-                                    output.ttft = ttft
-                                    most_recent_timestamp = timestamp
-                                    saw_prefill_ttft = True
-                                    continue
 
                             # NOTE: Some completion API might have a last
                             # usage summary response without a token so we
@@ -590,14 +586,9 @@ async def async_request_sglang_generate(
                                     num_new_tokens = output_len - last_output_len
                                     if num_new_tokens == 0:
                                         continue
-                                    # If we already marked TTFT on a zero-token prefill chunk (TiDAR),
-                                    # skip attributing prefill->first-decode delay to ITL.
-                                    if saw_prefill_ttft and last_output_len == 0:
-                                        saw_prefill_ttft = False
-                                    else:
-                                        chunk_gap = timestamp - most_recent_timestamp
-                                        adjust_itl = chunk_gap / num_new_tokens
-                                        output.itl.extend([adjust_itl] * num_new_tokens)
+                                    chunk_gap = timestamp - most_recent_timestamp
+                                    adjust_itl = chunk_gap / num_new_tokens
+                                    output.itl.extend([adjust_itl] * num_new_tokens)
 
                                 most_recent_timestamp = timestamp
                                 last_output_len = output_len
@@ -1727,7 +1718,11 @@ def calculate_metrics(
             total_input_text += input_requests[i].text_prompt_len
             total_input_vision += input_requests[i].vision_prompt_len
             if output_len > 1:
-                tpots.append((outputs[i].latency - outputs[i].ttft) / (output_len - 1))
+                if is_tidar:
+                    # tidar outputs all tokens during decode
+                    tpots.append((outputs[i].latency - outputs[i].ttft) / output_len)
+                else:
+                    tpots.append((outputs[i].latency - outputs[i].ttft) / (output_len - 1))
             if use_retokenized_itl:
                 for k, itl in enumerate(outputs[i].itl):
                     num_tokens = len(
@@ -2707,4 +2702,13 @@ if __name__ == "__main__":
         "--tag", type=str, default=None, help="The tag to be dumped to output."
     )
     args = parser.parse_args()
+
+    if 'tidar' in args.model.lower() or 'tidar' in args.served_model_name.lower():
+        assert args.backend == 'sglang-oai', (
+            "Use backend=sglang-oai for TiDAR model to get correct TTFT and ITL metrics"
+        )
+        is_tidar = True
+    else:
+        is_tidar = False
+
     run_benchmark(args)
