@@ -3,67 +3,28 @@
 bash tidar_data/gen_all_data.sh
 ```
 
+### Supported models
+```
+tidar_1.5b
+tidar_8b
+qwen2.5_1.5b
+qwen3_8b
+qwen3_eagle_8b
+```
+
 ### Launch server
 ```
-python -m sglang.launch_server --config [qwen3 | qwen3_eagle | tidar]_8b_config.yaml
+bash tidar_launch_server <model_name>
 ```
 
-### Benchmark performance
-
-use `sharegpt-single-turn` as the `dataset-name` for our custom dumped data. 
-
-1. Base model
-
+### Launch client
+We can get all benchmark numbers by running
 ```
-python -m sglang.bench_serving \
-    --backend sglang-oai \
-    --host 127.0.0.1 \
-    --port 30000 \
-    --request-rate 1 \
-    --max-concurrency 1 \
-    --model /lustre/fsw/portfolios/nvr/users/jinliu/public_models/Qwen3-8B \
-    --served-model-name qwen3_8b \
-    --tokenizer /lustre/fsw/portfolios/nvr/users/jinliu/public_models/Qwen3-8B \
-    --dataset-name sharegpt-single-turn \
-    --dataset-path tidar_data/default_sharegpt.jsonl \
-    --num-prompts 128 \
-    --sharegpt-output-len 512 \
-    --output-file tidar_data/benchmark_results/qwen3_out.jsonl
+bash tidar_launch_client <model_name>
 ```
 
-2. Eagle3
-
+### Run interative
 ```
-python -m sglang.bench_serving \
-    --backend sglang-oai \
-    --host 127.0.0.1 \
-    --port 30000 \
-    --request-rate 1 \
-    --max-concurrency 1 \
-    --model /lustre/fsw/portfolios/nvr/users/jinliu/public_models/Qwen3-8B \
-    --served-model-name qwen3_eagle_8b \
-    --tokenizer /lustre/fsw/portfolios/nvr/users/jinliu/public_models/Qwen3-8B \
-    --dataset-name sharegpt-single-turn \
-    --dataset-path tidar_data/default_sharegpt.jsonl \
-    --num-prompts 128 \
-    --sharegpt-output-len 512 \
-    --output-file tidar_data/benchmark_results/qwen3_eagle_out.jsonl
+python tidar_interative.py
 ```
-
-3. TiDAR
-```
-python -m sglang.bench_serving \
-    --backend sglang-oai \
-    --host 127.0.0.1 \
-    --port 30000 \
-    --request-rate 1 \
-    --max-concurrency 1 \
-    --model /lustre/fsw/portfolios/nvr/users/jinliu/megatron_exp/tidar_8b_sglang \
-    --served-model-name tidar_8b \
-    --tokenizer /lustre/fsw/portfolios/nvr/users/jinliu/public_models/Qwen3-8B \
-    --dataset-name sharegpt-single-turn \
-    --dataset-path tidar_data/default_sharegpt.jsonl \
-    --num-prompts 128 \
-    --sharegpt-output-len 512 \
-    --output-file tidar_data/benchmark_results/tidar.jsonl
-```
+When prompted, enter the model name and whether to use quantization
