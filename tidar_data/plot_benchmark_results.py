@@ -22,7 +22,7 @@ def main():
     model_to_accept = {model: [] for model in models}
     for task in tasks:
         for model in models:
-            path = os.path.join(base_dir, f"{model}_{task}.jsonl")
+            path = os.path.join(base_dir, f"{model}_8b_{task}.jsonl")
             with open(path, "r") as f:
                 stats = json.load(f)
             value = stats.get(metric_key, None)

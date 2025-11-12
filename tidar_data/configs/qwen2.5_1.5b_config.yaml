@@ -1,0 +1,12 @@
+model-path: /lustre/fsw/portfolios/nvr/users/jinliu/public_models/Qwen2.5-1.5B-Base
+served-model-name: qwen2.5_1.5b
+host: 0.0.0.0
+port: 30000
+max-running-requests: 1
+disable-overlap-schedule: true
+# enable-metrics: true
+# log-requests: true
+# disable-cuda-graph: true
+cuda-graph-max-bs: 1
+chunked-prefill-size: -1
+disable-radix-cache: true
