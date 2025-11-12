@@ -3,13 +3,19 @@ tasks=("humaneval_all" "mbpp_all" "gsm8k_cot" "minerva_math")
 output_len=512
 num_prompts=128
 
-if [ "$model_name" == "qwen3" ]; then
+if [ "$model_name" == "qwen2.5_1.5b" ]; then
+    model_path="/lustre/fsw/portfolios/nvr/users/jinliu/public_models/Qwen2.5-1.5B-Base"
+    served_model_name="qwen2.5_1.5b"
+elif [ "$model_name" == "qwen3_8b" ]; then
     model_path="/lustre/fsw/portfolios/nvr/users/jinliu/public_models/Qwen3-8B"
     served_model_name="qwen3_8b"
-elif [ "$model_name" == "qwen3_eagle" ]; then
+elif [ "$model_name" == "qwen3_eagle_8b" ]; then
     model_path="/lustre/fsw/portfolios/nvr/users/jinliu/public_models/Qwen3-8B"
     served_model_name="qwen3_eagle_8b"
-elif [ "$model_name" == "tidar" ]; then
+elif [ "$model_name" == "tidar_1.5b" ]; then
+    model_path="/lustre/fsw/portfolios/nvr/users/jinliu/megatron_exp/tidar_1.5b_sglang"
+    served_model_name="tidar_1.5b"
+elif [ "$model_name" == "tidar_8b" ]; then
     model_path="/lustre/fsw/portfolios/nvr/users/jinliu/megatron_exp/tidar_8b_sglang"
     served_model_name="tidar_8b"
 else

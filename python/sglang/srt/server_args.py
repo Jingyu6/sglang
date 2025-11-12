@@ -1474,19 +1474,19 @@ class ServerArgs:
                 )
 
     def _handle_speculative_decoding(self):
-        # Default TiDAR algorithm when model architecture is TiDARForCausalLM
+        # Default TiDAR algorithm when model architecture is TiDAR*ForCausalLM
         try:
             if self.speculative_algorithm is None:
                 model_arch = self.get_hf_config().architectures[0]
-                if model_arch == "TiDARForCausalLM":
+                if model_arch.startswith("TiDAR"):
                     self.speculative_algorithm = "TIDAR"
             else:
                 # If user explicitly sets TIDAR, validate the model arch
                 if self.speculative_algorithm == "TIDAR":
                     model_arch = self.get_hf_config().architectures[0]
-                    if model_arch != "TiDARForCausalLM":
+                    if not model_arch.startswith("TiDAR"):
                         raise ValueError(
-                            "Speculative algorithm TIDAR requires a TiDAR model (architectures=['TiDARForCausalLM'])."
+                            "Speculative algorithm TIDAR requires a TiDAR model (architectures=['TiDAR*ForCausalLM'])."
                         )
         except Exception:
             # Keep silent if model config cannot be read at this time

@@ -46,10 +46,53 @@ def save_sharded_safetensors(state_dict: dict, index_path: str, out_dir: str):
         json.dump(index_json, f, indent=2)
 
 
+def ensure_unique_storage_for_safetensors(state_dict: dict) -> int:
+    """
+    Clone tensors that share underlying storage so that saving with safetensors does not fail.
+    Returns the number of tensors that were cloned.
+    """
+    cloned = 0
+    seen_ptrs = {}
+    for name, value in list(state_dict.items()):
+        if not isinstance(value, torch.Tensor):
+            continue
+        base_ptr = None
+        try:
+            base_ptr = value.untyped_storage().data_ptr()
+        except Exception:
+            try:
+                base_ptr = value.storage().data_ptr()
+            except Exception:
+                base_ptr = id(value)
+        if base_ptr in seen_ptrs:
+            state_dict[name] = value.clone()
+            cloned += 1
+        else:
+            seen_ptrs[base_ptr] = name
+    return cloned
+
+
+def save_single_safetensors(state_dict: dict, out_dir: str, filename: str = "model.safetensors"):
+    os.makedirs(out_dir, exist_ok=True)
+    tensors_only = {}
+    for name, value in state_dict.items():
+        if isinstance(value, torch.Tensor):
+            tensors_only[name] = value.contiguous()
+    if not tensors_only:
+        raise ValueError("No tensor parameters found in checkpoint state_dict to save.")
+    out_path = os.path.join(out_dir, filename)
+    save_file(tensors_only, out_path)
+
+
 def write_tidar_config(src_config_path: str, dst_config_path: str):
     with open(src_config_path, "r") as f:
         cfg = json.load(f)
-    cfg["architectures"] = ["TiDARForCausalLM"]
+    if cfg["architectures"][0].startswith("Qwen3"):
+        cfg["architectures"] = ["TiDARForCausalLM"]
+    elif cfg["architectures"][0].startswith("Qwen2"):
+        cfg["architectures"] = ["TiDARSmallForCausalLM"]
+    else:
+        raise ValueError(f"Unsupported architecture: {cfg['architectures'][0]}")
     with open(dst_config_path, "w") as f:
         json.dump(cfg, f, indent=2)
 
@@ -72,9 +115,9 @@ def copy_non_weight_files(src_dir: str, dst_dir: str):
 def main():
     """
     python convert_to_sglang_weights.py \
-        --src-model-dir /lustre/fsw/portfolios/nvr/users/jinliu/public_models/Qwen3-8B \
-        --checkpoint /lustre/fsw/portfolios/nvr/users/jinliu/megatron_exp/tidar_8b.pt \
-        --out-dir /lustre/fsw/portfolios/nvr/users/jinliu/megatron_exp/tidar_8b_sglang
+        --src-model-dir <path_to_source_model>/Qwen3-8B \
+        --checkpoint <path_to_megatron_checkpoint>/tidar_8b.pt \
+        --out-dir <path_to_output_dir>/tidar_8b_sglang
     """
     parser = argparse.ArgumentParser(
         description="Save checkpoint as sharded safetensors matching original layout, update config to TiDARForCausalLM, and copy non-weight files."
@@ -90,6 +133,7 @@ def main():
 
     index_path = os.path.join(src_model_dir, "model.safetensors.index.json")
     config_path = os.path.join(src_model_dir, "config.json")
+    single_sf_path = os.path.join(src_model_dir, "model.safetensors")
 
     print("[TiDAR] Loading checkpoint ...")
     state_dict = load_checkpoint_state_dict(ckpt_path)
@@ -98,8 +142,22 @@ def main():
         print("[TiDAR] Tying lm_head.weight to model.embed_tokens.weight")
         state_dict["lm_head.weight"] = state_dict["model.embed_tokens.weight"]
 
-    print(f"[TiDAR] Saving sharded weights to {out_dir}")
-    save_sharded_safetensors(state_dict, index_path, out_dir)
+    # Break any shared storages across different parameter names (e.g., tied weights)
+    num_cloned = ensure_unique_storage_for_safetensors(state_dict)
+    if num_cloned > 0:
+        print(f"[TiDAR] Detected {num_cloned} shared-storage tensors; cloned to ensure unique storage for safetensors.")
+
+    if os.path.exists(index_path):
+        print(f"[TiDAR] Found index.json. Saving sharded weights to {out_dir}")
+        save_sharded_safetensors(state_dict, index_path, out_dir)
+    elif os.path.exists(single_sf_path):
+        print(f"[TiDAR] No index.json found. Detected single-file weights. Saving to {out_dir}/model.safetensors")
+        save_single_safetensors(state_dict, out_dir, "model.safetensors")
+    else:
+        raise FileNotFoundError(
+            "Neither 'model.safetensors.index.json' nor 'model.safetensors' found in src model dir. "
+            "Cannot determine original weight layout."
+        )
 
     print("[TiDAR] Copying non-weight files ...")
     copy_non_weight_files(src_model_dir, out_dir)
