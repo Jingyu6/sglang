@@ -1,9 +1,9 @@
-model-path: /lustre/fsw/portfolios/nvr/users/jinliu/public_models/Qwen3-8B
+model-path: <work_dir>/public_models/Qwen3-8B
 served-model-name: qwen3_eagle_8b
 host: 0.0.0.0
 port: 30000
 speculative-algorithm: EAGLE3
-speculative-draft-model-path: /lustre/fsw/portfolios/nvr/users/jinliu/public_models/qwen3_8b_eagle3
+speculative-draft-model-path: <work_dir>/public_models/qwen3_8b_eagle3
 speculative-num-steps: 6
 speculative-eagle-topk: 10
 speculative-num-draft-tokens: 32
