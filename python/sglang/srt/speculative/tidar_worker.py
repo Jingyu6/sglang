@@ -151,8 +151,6 @@ class TiDARWorker(BaseSpecWorker):
         logits_output = forward_out.logits_output
         next_token_probs = torch.softmax(logits_output.next_token_logits, dim=-1)
         next_token_ids = torch.argmax(next_token_probs, dim=-1)
-        # print(f"next_token_ids: {next_token_ids}")
-        # print("================================================")
 
         # clean all cache
         batch.tree_cache.token_to_kv_pool_allocator.free(batch.out_cache_loc)
@@ -192,9 +190,6 @@ class TiDARWorker(BaseSpecWorker):
             device=self.device
         )
 
-        # print(f"positions shape: {positions.shape}")
-        # print(f"positions min/max: {positions.min()}/{positions.max()}")
-
         spec_input = TiDARInput(draft_token, positions, custom_mask, num_queries=B)
         self.target_worker.model_runner.attn_backend.num_draft_tokens = B
 
@@ -219,11 +214,6 @@ class TiDARWorker(BaseSpecWorker):
             logits_output = forward_out.logits_output
             can_run_cuda_graph = forward_out.can_run_cuda_graph
 
-        # print("After forward")
-        # print(batch.seq_lens)
-        # print(batch.seq_lens_cpu)
-        # print("================================================")
-
         # first merge the logits
         bs = len(batch.seq_lens_cpu)
 
@@ -238,6 +228,8 @@ class TiDARWorker(BaseSpecWorker):
             logits[0, 1:, 0] * (1 - self.trust_ar_ratio)
         )
         # add temperature here
+        # we only add temperature to the mixture since we want to use argmax for 
+        # parallel drafting due to strong independence assumption
         temperature = batch.reqs[0].sampling_params.temperature
         if temperature > 0:
             logits[0, 0].div_(temperature)
@@ -261,8 +253,6 @@ class TiDARWorker(BaseSpecWorker):
                 verify_probs[0, accept_cnt]
             ) < torch.rand(1, device=self.device):
                 break
-            # if new_draft_tokens[0, 0, accept_cnt - 1] != verify_tokens[0, accept_cnt]:
-            #     break
             select_draft_tokens = new_draft_tokens[0, accept_cnt + 1]
             select_draft_probs = new_draft_probs[0, accept_cnt + 1]
             accept_cnt += 1
@@ -284,9 +274,6 @@ class TiDARWorker(BaseSpecWorker):
             batch.tree_cache.protected_size_ -= len(cur_req.prefix_indices)
             accept_cnt = max_extra_tokens # trim off extra tokens
         
-        # print free slots
-        # self._print_free_slots(batch)
-
         # Keep only the first accept_cnt queries' KV; evict the rest
         accept_lens = torch.full((bs,), accept_cnt, dtype=torch.int32, device=self.device)
 
@@ -297,11 +284,6 @@ class TiDARWorker(BaseSpecWorker):
         accept_tokens = verify_tokens[0, :accept_cnt].view(-1)
         total_accepted = int(accept_lens.sum().item())
         assert total_accepted >= 0, "Total accepted tokens must be non-negative"
-
-        # print(f"prev_draft_tokens: {prev_draft_tokens}")
-        # print(f"new_draft_tokens: {new_draft_tokens}")
-        # print(f"accept_tokens: {accept_tokens}")
-        # print("================================================")
 
         return GenerationBatchResult(
             logits_output=logits_output,
@@ -317,8 +299,3 @@ class TiDARWorker(BaseSpecWorker):
             accept_lens=accept_lens,
             allocate_lens=None,
         )
-
-    def _print_free_slots(self, batch: ScheduleBatch):
-        available_size = batch.token_to_kv_pool_allocator.available_size()
-        total_size = batch.token_to_kv_pool_allocator.size
-        print(f"total size: {total_size}, free slots: {available_size}, Allocated: {total_size - available_size}")
