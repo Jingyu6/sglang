@@ -1,3 +1,7 @@
+import sys
+
+sys.path.insert(0, "./tidar_sglang")
+
 import dataclasses
 from sglang import function, gen, Runtime
 from sglang.srt.server_args import prepare_server_args, ServerArgs

@@ -1,3 +1,6 @@
+#!/bin/bash
+export PYTHONPATH="./tidar_sglang:$PYTHONPATH"
+
 model_name=$1
 tasks=("humaneval_all" "mbpp_all" "gsm8k_cot" "minerva_math")
 output_len=512
