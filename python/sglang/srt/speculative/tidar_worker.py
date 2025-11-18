@@ -149,7 +149,8 @@ class TiDARWorker(BaseSpecWorker):
         )
 
         logits_output = forward_out.logits_output
-        next_token_ids = torch.argmax(logits_output.next_token_logits, dim=-1)
+        next_token_probs = torch.softmax(logits_output.next_token_logits, dim=-1)
+        next_token_ids = torch.argmax(next_token_probs, dim=-1)
         # print(f"next_token_ids: {next_token_ids}")
         # print("================================================")
 
@@ -160,7 +161,12 @@ class TiDARWorker(BaseSpecWorker):
             logits_output=base.logits_output, # dummy
             next_token_ids=base.next_token_ids, # dummy
             can_run_cuda_graph=base.can_run_cuda_graph,
-            next_draft_input=next_token_ids.to(torch.int32),
+            next_draft_input=(
+                # return ids
+                next_token_ids.to(torch.int32),
+                # return their probabilities
+                next_token_probs.gather(dim=-1, index=next_token_ids.unsqueeze(-1)).squeeze(-1)
+            ),
             accept_lens=None,
             allocate_lens=None,
             num_accepted_tokens=0, # because we didn't produce any real token during prefill
@@ -175,7 +181,7 @@ class TiDARWorker(BaseSpecWorker):
 
         # get the previous draft tokens
         assert batch.spec_info is not None, "Missing draft tokens from the previous step"
-        prev_draft_tokens = batch.spec_info
+        prev_draft_tokens, prev_draft_probs = batch.spec_info
         batch.spec_info = None
 
         draft_token, positions, custom_mask = build_tidar_positions_and_mask_decode(
@@ -231,19 +237,34 @@ class TiDARWorker(BaseSpecWorker):
             logits[0, 0] * self.trust_ar_ratio + 
             logits[0, 1:, 0] * (1 - self.trust_ar_ratio)
         )
+        # add temperature here
+        temperature = batch.reqs[0].sampling_params.temperature
+        if temperature > 0:
+            logits[0, 0].div_(temperature)
+        
         # sampling here
-        verify_tokens = prev_draft_tokens.view(bs, block_size) # [bs, block_size]
-        new_draft_tokens = torch.argmax(logits, dim=-1)        # [bs, block_size + 1, block_size]
+        verify_probs = prev_draft_probs.view(bs, block_size)     # [bs, block_size]
+        verify_tokens = prev_draft_tokens.view(bs, block_size)   # [bs, block_size]
+        new_draft_probs = torch.softmax(logits, dim=-1)          # [bs, block_size + 1, block_size, vocab_size]
+        new_draft_tokens = torch.argmax(new_draft_probs, dim=-1) # [bs, block_size + 1, block_size]
 
         # TiDAR verification
         assert bs == 1, "TiDAR only supports batch size 1 for now"
         accept_cnt = 1
         select_draft_tokens = new_draft_tokens[0, 1] # we default to the first new draft set
+        select_draft_probs = new_draft_probs[0, 1]
 
         while accept_cnt < block_size:
-            if new_draft_tokens[0, 0, accept_cnt - 1] != verify_tokens[0, accept_cnt]:
+            verify_token = verify_tokens[0, accept_cnt].item()
+            if (
+                new_draft_probs[0, 0, accept_cnt - 1, verify_token] / 
+                verify_probs[0, accept_cnt]
+            ) < torch.rand(1, device=self.device):
                 break
+            # if new_draft_tokens[0, 0, accept_cnt - 1] != verify_tokens[0, accept_cnt]:
+            #     break
             select_draft_tokens = new_draft_tokens[0, accept_cnt + 1]
+            select_draft_probs = new_draft_probs[0, accept_cnt + 1]
             accept_cnt += 1
 
         # clean cache
@@ -287,7 +308,12 @@ class TiDARWorker(BaseSpecWorker):
             next_token_ids=accept_tokens,
             num_accepted_tokens=total_accepted,
             can_run_cuda_graph=can_run_cuda_graph,
-            next_draft_input=select_draft_tokens.view(-1).to(torch.int32),
+            next_draft_input=(
+                # return ids
+                select_draft_tokens.to(torch.int32),
+                # return their probabilities
+                select_draft_probs.gather(dim=-1, index=select_draft_tokens.unsqueeze(-1)).squeeze(-1)
+            ),
             accept_lens=accept_lens,
             allocate_lens=None,
         )
