@@ -23,7 +23,7 @@ pip install -e "python"
 ```
 
 #### Supported models
-We will release TiDAR 1.5B and 8B models as soon as we can, and our benchmark results on SGLang supports the following variants: 
+<strong>We will release TiDAR 1.5B and 8B models as soon as we can</strong>, and our benchmarking on SGLang supports the following variants: 
 ```
 tidar_1.5b
 tidar_8b
@@ -50,6 +50,22 @@ To run the latency benchmarking, first generate real query data (TiDAR's perform
 ```
 bash tidar_data/gen_all_data.sh
 ```
+
+#### Generation configs
+All model configs are specified in `tidar_data/configs`. And our implementation requires: 
+```yaml
+max-running-requests: 1
+disable-overlap-schedule: true
+disable-radix-cache: true
+chunked-prefill-size: -1
+```
+CUDA graph can be turned on or off by setting: 
+```yaml
+# use one of the following
+cuda-graph-max-bs: 1
+disable-cuda-graph: true
+```
+For sampling parameters, please refer to `tidar_sglang/python/sglang/bench_serving.py` and `run_interactive.py`. 
 
 ### Benchmarking
 
