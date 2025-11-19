@@ -241,3 +241,12 @@ lmms-eval
 
 **/.claude/
 **/.serena/
+
+# Allow assets images
+!tidar_sglang/assets/
+!tidar_sglang/assets/*.png
+!tidar_sglang/assets/*.pdf
+
+!tidar_sglang/3rdparty/
+!tidar_sglang/3rdparty/**/*.[ch]
+!tidar_sglang/3rdparty/**/*.[ch]pp
