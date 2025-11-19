@@ -56,20 +56,20 @@ bash tidar_data/gen_all_data.sh
 #### Test model generation with interactive session
 We can start by testing the generation output of different models using interative sessions by running: 
 ```bash
-python tidar_interative.py
+python run_interative.py
 ```
 When prompted, enter the model name and whether to use quantization
 
 #### Server API benchmarking
 First launch the server using the following command:
 ```bash
-bash tidar_launch_server <model_name>
+bash launch_server.sh <model_name>
 ```
 
 And then launch the client with the following commands over all tasks: 
 We can get all benchmark numbers by running
 ```bash
-bash tidar_launch_client <model_name>
+bash launch_client.sh <model_name>
 ```
 
 ### Citation
