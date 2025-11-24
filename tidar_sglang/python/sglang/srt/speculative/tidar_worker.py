@@ -256,6 +256,17 @@ class TiDARWorker(BaseSpecWorker):
         new_draft_probs = torch.softmax(logits, dim=-1)          # [bs, block_size + 1, block_size, vocab_size]
         new_draft_tokens = torch.argmax(new_draft_probs, dim=-1) # [bs, block_size + 1, block_size]
 
+        # apply repetition penalty here
+        from transformers.generation.logits_process import RepetitionPenaltyLogitsProcessor # type: ignore
+        processor = RepetitionPenaltyLogitsProcessor(penalty=1.2)
+        for position in range(1, block_size):
+            step_scores = logits[0, 1:, position, :]
+            prior_tokens = new_draft_tokens[0, 1:, :position]
+            _step_scores = processor(prior_tokens, step_scores)
+            _step_probs = torch.softmax(_step_scores, dim=-1)
+            new_draft_probs[0, 1:, position, :] = _step_probs
+            new_draft_tokens[0, 1:, position] = torch.argmax(_step_probs, dim=-1)
+
         # TiDAR verification
         assert bs == 1, "TiDAR only supports batch size 1 for now"
         accept_cnt = 1
